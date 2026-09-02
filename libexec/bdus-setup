@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# bdus setup host [--with-unattended] [--skip-ufw]
+#   One-time host preparation. Needs sudo. Idempotent.
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+
+what="${1:-}"; shift || true
+case "$what" in
+  host) exec sudo -E "$BDUS_OPS_DIR/setup/host.sh" \
+          --bdus-root "$BDUS_ROOT" --allow-ips "$PROXY_ALLOW_IPS" --user "${SUDO_USER:-$USER}" "$@" ;;
+  ""|-h|--help) say "bdus setup host [--with-unattended] [--skip-ufw]" ; exit 0 ;;
+  *) die "unknown setup target '$what' (only: host)" ;;
+esac

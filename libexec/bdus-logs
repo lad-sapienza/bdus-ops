@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# bdus logs <instance> [docker compose logs args...]   e.g.  bdus logs prod -f --tail=100
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+i="${1:?usage: bdus logs <instance> [args]}"; shift || true
+instance_known "$i" || die "unknown instance '$i'"
+cd "$(instance_dir "$i")"
+exec docker compose logs "$@"

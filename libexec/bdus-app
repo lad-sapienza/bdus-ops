@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# bdus app add  <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--password-stdin]
+# bdus app list [instance|all]
+#
+# `add` wraps vendor/add-app.sh (which itself calls bin/create-app.php inside
+# the api container — no HTTP, no BRADYPUS_ALLOW_NEW_APP toggle). Requires the
+# api image >= 5.4.6.
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+
+action="${1:?usage: bdus app add|list ...}"; shift || true
+
+case "$action" in
+  add)
+    inst="${1:?bdus app add <instance> --name ... --engine ... --email ...}"; shift
+    instance_known "$inst" || die "unknown instance '$inst'"
+    exec "$BDUS_OPS_DIR/vendor/add-app.sh" "$(instance_dir "$inst")" "$@"
+    ;;
+  list)
+    while read -r i; do
+      [ -f "$(instance_dir "$i")/.env" ] || continue
+      printf '%s%s%s\n' "$_c" "$i" "$_z" >&2
+      dc "$i" exec -T api sh -lc '
+        for d in projects/*/; do
+          [ -f "$d/config.json" ] || continue
+          n=$(basename "$d")
+          e=$(sed -n "s/.*\"db_engine\"[[:space:]]*:[[:space:]]*\"\([a-z]*\)\".*/\1/p" "$d/config.json" | head -1)
+          db=$(sed -n "s/.*\"db_name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$d/config.json" | head -1)
+          printf "  %-24s %-8s %s\n" "$n" "${e:-?}" "$db"
+        done
+      ' 2>/dev/null || warn "  ($i not running)"
+    done < <(resolve_instances "${1:-all}")
+    ;;
+  -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown action '$action' (add|list)" ;;
+esac

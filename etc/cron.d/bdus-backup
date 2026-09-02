@@ -1,0 +1,13 @@
+# bdus-ops — nightly backup of every instance.
+# Copy to /etc/cron.d/bdus-backup and adjust the path to `bdus` if needed.
+#
+#   sudo cp <repo>/etc/cron.d/bdus-backup /etc/cron.d/bdus-backup
+#
+# Runs as the user that owns the deploy (not root) so `docker` and the instance
+# dirs are reachable. `bdus backup all` picks the right strategy per instance and
+# does the off-box rsync if BACKUP_RSYNC_TARGET is set in config.env.
+
+SHELL=/bin/bash
+15 2 * * *  debian  /usr/local/sbin/bdus backup all  >> /var/log/bdus-backup.log 2>&1
+# optional heartbeat: mail yourself if anything is wrong
+# 5  8 * * *  debian  /usr/local/sbin/bdus status || echo "bdus status FAILED on $(hostname)"

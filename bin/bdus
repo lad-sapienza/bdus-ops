@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# bdus — deployment toolbox for this BraDypUS install.
+# Dispatches to libexec/bdus-<verb>. See `bdus help`.
+set -euo pipefail
+
+self="$(readlink -f "$0" 2>/dev/null || realpath "$0")"
+BDUS_OPS_DIR="$(cd "$(dirname "$self")/.." && pwd)"
+export BDUS_OPS_DIR
+
+verb="${1:-help}"
+[ $# -gt 0 ] && shift || true
+
+case "$verb" in
+  -h|--help|help|'') exec "$BDUS_OPS_DIR/libexec/bdus-help" ;;
+esac
+
+sub="$BDUS_OPS_DIR/libexec/bdus-$verb"
+if [ ! -x "$sub" ]; then
+  printf 'bdus: unknown command "%s" — try: bdus help\n' "$verb" >&2
+  exit 2
+fi
+exec "$sub" "$@"

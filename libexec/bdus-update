@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# bdus update <instance|all> <X.Y.Z> [--yes] [--no-backup]
+#
+#   1. verifies API_IMAGE:<ver> and APP_IMAGE:<ver> exist on GHCR
+#   2. per instance, in INSTANCES order (demo before prod):
+#        - backup (skipped for --no-backup; always kept for pg instances)
+#        - set BDUS_VERSION in .env, `docker compose pull`, `up -d`
+#        - poll health; on failure revert the .env pin and `up -d`, then stop
+#   3. --yes skips the per-instance confirmation (asked before every instance
+#      except the first when target is "all")
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+
+target=""; ver=""; yes=0; nobackup=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --yes|-y)    yes=1; shift ;;
+    --no-backup) nobackup=1; shift ;;
+    -h|--help)   sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*)          die "unknown option: $1" ;;
+    *)           if [ -z "$target" ]; then target="$1"; elif [ -z "$ver" ]; then ver="$1"; else die "extra arg: $1"; fi; shift ;;
+  esac
+done
+[ -n "$target" ] && [ -n "$ver" ] || die "usage: bdus update <instance|all> <X.Y.Z> [--yes] [--no-backup]"
+valid_semver "$ver" || die "version must be X.Y.Z (got '$ver')"
+
+info "checking $API_IMAGE:$ver and $APP_IMAGE:$ver on the registry…"
+image_tag_exists "$API_IMAGE" "$ver" || die "$API_IMAGE:$ver not found on GHCR (CI still building?)"
+image_tag_exists "$APP_IMAGE" "$ver" || die "$APP_IMAGE:$ver not found on GHCR"
+ok "both images present"
+
+first=1
+while read -r i; do
+  cur="$(instance_version "$i" || true)"
+  if [ "$cur" = "$ver" ]; then info "$i already on $ver — skip"; first=0; continue; fi
+
+  if [ "$yes" -ne 1 ] && { [ "$first" -ne 1 ] || [ "$target" != all ]; }; then
+    confirm "update $i  $cur → $ver ?" || { info "$i skipped"; first=0; continue; }
+  fi
+
+  if [ "$nobackup" -ne 1 ]; then
+    info "backing up $i first…"
+    "$BDUS_OPS_DIR/libexec/bdus-backup" "$i" --no-rsync || die "backup of $i failed — aborting update"
+  fi
+
+  info "$i: $cur → $ver"
+  sed -i.bak "s/^BDUS_VERSION=.*/BDUS_VERSION=${ver}/" "$(instance_dir "$i")/.env"
+  dc "$i" pull -q
+  dc "$i" up -d
+
+  if wait_health "$i" 120; then
+    rm -f "$(instance_dir "$i")/.env.bak"
+    ok "$i now on $ver and healthy"
+  else
+    bad "$i did not come back — reverting pin to $cur"
+    mv "$(instance_dir "$i")/.env.bak" "$(instance_dir "$i")/.env"
+    dc "$i" up -d || true
+    die "$i reverted to $cur. The DB may have run migrations for $ver — inspect and restore from backup if needed."
+  fi
+  first=0
+done < <(resolve_instances "$target")

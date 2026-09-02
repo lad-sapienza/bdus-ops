@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# bdus restore <instance> [--db FILE] [--files FILE] [--yes]
+#
+# Stops the api container, restores, starts it again.
+#   --files FILE   projects_data tar.gz   (default: newest <project>-files-*.tar.gz)
+#   --db FILE      pg_dumpall .sql.gz     (postgres instances only; default: newest)
+#   --yes          skip the confirmation prompt
+#
+# Data present in the target but absent from the archive is left untouched
+# (files); the Postgres restore replays CREATE DATABASE / data as dumped.
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+
+inst=""; dbf=""; filesf=""; yes=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --db)    dbf="${2:?}";     shift 2 ;;
+    --files) filesf="${2:?}";  shift 2 ;;
+    --yes|-y) yes=1; shift ;;
+    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*)      die "unknown option: $1" ;;
+    *)       [ -z "$inst" ] || die "one instance"; inst="$1"; shift ;;
+  esac
+done
+[ -n "$inst" ] || die "usage: bdus restore <instance> [--db F] [--files F] [--yes]"
+instance_known "$inst" || die "unknown instance '$inst'"
+
+proj="$(instance_project "$inst")" || die "$inst: no .env"
+dest="$(backup_dir "$inst")"
+has_pg=0; instance_has_pg "$inst" && has_pg=1
+
+latest() { ls -1t "$dest/$1" 2>/dev/null | head -1; }
+[ -n "$filesf" ] || filesf="$(latest "${proj}-files-*.tar.gz")"
+[ -n "$filesf" ] || die "no files archive in $dest (pass --files)"
+[ -f "$filesf" ] || die "not found: $filesf"
+
+if [ "$has_pg" -eq 1 ]; then
+  [ -n "$dbf" ] || dbf="$(latest "${proj}-pgall-*.sql.gz")"
+  [ -n "$dbf" ] || die "postgres instance but no pgall archive (pass --db)"
+  [ -f "$dbf" ] || die "not found: $dbf"
+fi
+
+say ""
+warn "RESTORE $inst ($proj) — overwrites live data"
+say "  files : $filesf"
+[ "$has_pg" -eq 1 ] && say "  db    : $dbf"
+say ""
+[ "$yes" -eq 1 ] || confirm "Proceed?" || { info "aborted"; exit 0; }
+
+info "stopping api…"
+dc "$inst" stop api
+
+if [ "$has_pg" -eq 1 ]; then
+  pguser="$(env_get "$inst" POSTGRES_USER || echo bdus)"
+  info "restoring Postgres (pg_dumpall)…"
+  gunzip -c "$dbf" | dc "$inst" exec -T postgres psql -q -U "$pguser" -d postgres >/dev/null
+  ok "postgres restored"
+fi
+
+info "restoring projects_data…"
+dc "$inst" run --rm --no-deps -T --entrypoint /usr/local/bin/docker-restore.sh api < "$filesf"
+ok "projects_data restored"
+
+dc "$inst" start api
+if wait_health "$inst" 90; then ok "$inst healthy"; else warn "$inst did not pass health — check: bdus logs $inst"; fi

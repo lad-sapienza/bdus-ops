@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# bdus backup [instance|all] [--no-rsync]
+#
+# Per instance, into <instance>/backups/ :
+#   sqlite-only  →  <project>-files-<ts>.tar.gz          (projects_data volume)
+#   with postgres →  the above  +  <project>-pgall-<ts>.sql.gz   (pg_dumpall)
+#
+# Keeps the newest BACKUP_RETENTION of each kind, then rsyncs the folder to
+# BACKUP_RSYNC_TARGET/<project>/ when that is set (skip with --no-rsync).
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+
+target="all"; rsync=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-rsync) rsync=0; shift ;;
+    -h|--help)  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*)         die "unknown option: $1" ;;
+    *)          target="$1"; shift ;;
+  esac
+done
+
+rc=0
+while read -r i; do
+  proj="$(instance_project "$i")" || { bad "$i: no .env"; rc=1; continue; }
+  dest="$(backup_dir "$i")"; mkdir -p "$dest"
+  ts="$(date +%Y%m%d-%H%M%S)"
+  info "backup $i ($proj)"
+
+  # 1 — projects_data (config, .jwt_secret, uploaded files, sqlite DBs)
+  ftar="$dest/${proj}-files-${ts}.tar.gz"
+  if dc "$i" exec -T api /usr/local/bin/docker-backup.sh > "$ftar.part" 2>/dev/null; then
+    mv "$ftar.part" "$ftar"; ok "  $(basename "$ftar")  ($(du -h "$ftar" | cut -f1))"
+  else
+    rm -f "$ftar.part"; bad "  projects_data backup failed (is '$i' up?)"; rc=1; continue
+  fi
+
+  # 2 — every Postgres database + roles
+  if instance_has_pg "$i"; then
+    pguser="$(env_get "$i" POSTGRES_USER || echo bdus)"
+    pgz="$dest/${proj}-pgall-${ts}.sql.gz"
+    if dc "$i" exec -T postgres pg_dumpall -U "$pguser" 2>/dev/null | gzip > "$pgz.part"; then
+      mv "$pgz.part" "$pgz"; ok "  $(basename "$pgz")  ($(du -h "$pgz" | cut -f1))"
+    else
+      rm -f "$pgz.part"; bad "  pg_dumpall failed"; rc=1
+    fi
+  fi
+
+  # 3 — retention
+  for kind in files pgall; do
+    # shellcheck disable=SC2012
+    ls -1t "$dest/${proj}-${kind}-"* 2>/dev/null | tail -n +"$((BACKUP_RETENTION + 1))" | while read -r old; do
+      rm -f "$old"
+    done
+  done
+
+  # 4 — off-box copy
+  if [ "$rsync" -eq 1 ] && [ -n "$BACKUP_RSYNC_TARGET" ]; then
+    if rsync -a --delete "$dest/" "${BACKUP_RSYNC_TARGET%/}/${proj}/"; then
+      ok "  rsync → ${BACKUP_RSYNC_TARGET%/}/${proj}/"
+    else
+      bad "  rsync off-box failed"; rc=1
+    fi
+  fi
+done < <(resolve_instances "$target")
+
+exit "$rc"

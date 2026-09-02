@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# bdus pull <instance|all>   — docker compose pull (no restart)
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+while read -r i; do info "pull $i"; dc "$i" pull; done < <(resolve_instances "${1:-all}")

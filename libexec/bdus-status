@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# bdus status
+#
+# One line group per instance: containers, health, Postgres, newest backup + age,
+# version pin vs the image the api container is actually running.
+# Exit code != 0 if any instance has a stopped container, failing health,
+# failing Postgres, or a newest backup older than STALE_BACKUP_DAYS.
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+
+rc=0
+now="$(date +%s)"
+
+for i in $INSTANCES; do
+  d="$(instance_dir "$i")"
+  printf '%s── %s ─────────────────────────────────%s\n' "$_c" "$i" "$_z" >&2
+  if [ ! -f "$d/.env" ]; then bad "  not initialised (run: bdus init $i)"; rc=1; continue; fi
+
+  pin="$(instance_version "$i" || echo '?')"
+  proj="$(instance_project "$i" || echo "bdus-$i")"
+
+  # containers
+  ps="$(dc "$i" ps --format '{{.Service}}\t{{.State}}\t{{.Image}}' 2>/dev/null || true)"
+  if [ -z "$ps" ]; then bad "  no containers (down?)"; rc=1
+  else
+    while IFS=$'\t' read -r svc state img; do
+      [ -n "$svc" ] || continue
+      if [ "$state" = running ]; then ok "  $svc  running  ${_d}${img}${_z}"
+      else bad "  $svc  $state"; rc=1; fi
+      if [ "$svc" = api ] && [ "$pin" != latest ] && [ -n "$img" ] && [[ "$img" != *:$pin ]]; then
+        warn "    api image is '$img' but .env pins $pin"
+      fi
+    done <<< "$ps"
+  fi
+
+  # health
+  if instance_health "$i"; then ok "  health  $(env_get "$i" BDUS_PORT)${HEALTH_PATH}  → 200"
+  else bad "  health  unreachable"; rc=1; fi
+
+  # postgres
+  if instance_has_pg "$i"; then
+    if dc "$i" exec -T postgres pg_isready -U "$(env_get "$i" POSTGRES_USER || echo bdus)" >/dev/null 2>&1; then
+      ok "  postgres  accepting connections"
+    else bad "  postgres  not ready"; rc=1; fi
+  fi
+
+  # newest backup
+  # shellcheck disable=SC2012
+  nb="$(ls -1t "$(backup_dir "$i")/${proj}-files-"*.tar.gz 2>/dev/null | head -1 || true)"
+  if [ -z "$nb" ]; then bad "  backup  none found"; rc=1
+  else
+    age=$(( (now - $(date -r "$nb" +%s)) / 86400 ))
+    if [ "$age" -gt "$STALE_BACKUP_DAYS" ]; then bad "  backup  $(basename "$nb")  (${age}d old — stale)"; rc=1
+    else ok "  backup  $(basename "$nb")  (${age}d old)"; fi
+  fi
+done
+
+df -h "$BDUS_ROOT" | awk 'NR==1||NR==2{print "  "$0}' >&2
+exit "$rc"

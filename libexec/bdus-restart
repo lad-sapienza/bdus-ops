@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# bdus restart <instance|all>   — docker compose restart
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+while read -r i; do info "restart $i"; dc "$i" restart; done < <(resolve_instances "${1:-all}")

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# bdus start <instance|all>   — docker compose up -d
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+while read -r i; do info "start $i"; dc "$i" up -d; done < <(resolve_instances "${1:-all}")

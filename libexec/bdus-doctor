@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# bdus doctor   — check the deployment invariants. Exit != 0 if any check fails.
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+
+rc=0
+chk()  { if eval "$2" >/dev/null 2>&1; then ok "$1"; else bad "$1"; rc=1; fi; }
+chkw() { if eval "$2" >/dev/null 2>&1; then ok "$1"; else warn "$1"; fi; }
+
+info "host"
+chk  "docker service enabled"          "systemctl is-enabled --quiet docker"
+chk  "live-restore + json-file logging" '[ "$(docker info --format "{{.LoggingDriver}} {{.LiveRestoreEnabled}}")" = "json-file true" ]'
+chkw "ufw active"                       "sudo -n ufw status 2>/dev/null | grep -q '^Status: active' || ufw status 2>/dev/null | grep -q '^Status: active'"
+chk  "bdus-fw.sh present"               "[ -x /usr/local/sbin/bdus-fw.sh ]"
+chk  "bdus-fw.service enabled"          "systemctl is-enabled --quiet bdus-fw.service"
+chkw "DOCKER-USER has DROP rules"       "sudo -n iptables -S DOCKER-USER 2>/dev/null | grep -q -- '-j DROP' || iptables -S DOCKER-USER 2>/dev/null | grep -q -- '-j DROP'"
+chkw "backup cron installed"            "[ -f /etc/cron.d/bdus-backup ]"
+if [ -n "$BACKUP_RSYNC_TARGET" ]; then
+  host="${BACKUP_RSYNC_TARGET%%:*}"; host="${host#*@}"
+  chkw "rsync target reachable ($host)" "ssh -o BatchMode=yes -o ConnectTimeout=5 '${BACKUP_RSYNC_TARGET%%:*}' true"
+fi
+
+for i in $INSTANCES; do
+  d="$(instance_dir "$i")"
+  info "instance $i"
+  chk  "  dir exists"                   "[ -d '$d' ]"
+  chk  "  .env present"                 "[ -f '$d/.env' ]"
+  chk  "  .env is chmod 600"            "[ \"\$(stat -c '%a' '$d/.env' 2>/dev/null)\" = 600 ]"
+  chk  "  bdus.override.yml present"    "[ -f '$d/bdus.override.yml' ]"
+  chk  "  compose config valid"        "dc '$i' config --quiet"
+  chk  "  api container running"        "dc '$i' ps --status running --format '{{.Service}}' | grep -qx api"
+  if [ "$(cfg_instance "$i" POSTGRES)" = 1 ]; then
+    chk "  postgres healthy"            "dc '$i' exec -T postgres pg_isready -U \"\$(env_get '$i' POSTGRES_USER || echo bdus)\""
+  fi
+done
+
+exit "$rc"

@@ -1,0 +1,8 @@
+# the one machine-local file — holds paths and generated secrets are never here,
+# but keep it out of git anyway (per-server)
+config.env
+*.local
+
+# stray backups if someone runs a script from inside the repo
+backups/
+*.log

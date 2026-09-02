@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cat >&2 <<'EOF'
+bdus — deployment toolbox for this BraDypUS install
+
+  bdus <command> [instance|all] [args]
+
+Setup (one-time, needs sudo)
+  setup host              host prep: docker group, daemon.json, ufw, DOCKER-USER
+                          firewall + systemd unit, /srv/bradypus, unattended-upgrades
+
+Instances
+  init <instance>         create /srv/bradypus/<instance> from config.env
+                          (bradypus.yml + .env + bdus.override.yml), pull, up, wait healthy
+  status                  one-screen health of every instance (exit != 0 if anything is wrong)
+  update <inst|all> <ver> pull & switch to <ver>: checks the tag exists on GHCR, backs up
+                          prod first, verifies the instance comes back, reverts the pin if not
+  start | stop | restart <inst|all>
+  pull <inst|all>         pre-fetch images without restarting
+  logs <instance> [...]   docker compose logs, passthrough
+
+Data
+  backup [inst|all]       sqlite instance → projects_data tar; pg instance → pg_dumpall + tar.
+                          Prunes to BACKUP_RETENTION, rsyncs off-box if BACKUP_RSYNC_TARGET set.
+  restore <instance> [--db FILE] [--files FILE] [--yes]
+                          stop api → restore (latest by default) → start api
+
+Applications
+  app add <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X]
+  app list [inst|all]
+
+Diagnostics
+  doctor                  check the deploy invariants (.env perms, override, firewall rules,
+                          bradypus-fw.service, cron, rsync target)
+
+Config: config.env (copy from config.env.example). Runbook: DEPLOY-RUNBOOK.md.
+EOF

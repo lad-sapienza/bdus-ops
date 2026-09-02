@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# bdus psql <instance> [dbname]   — psql shell into the instance's Postgres
+#   default db: postgres.  App databases are named bdus_<app>.
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+i="${1:?usage: bdus psql <instance> [dbname]}"
+db="${2:-postgres}"
+instance_known "$i" || die "unknown instance '$i'"
+instance_has_pg "$i" || die "$i has no Postgres service"
+cd "$(instance_dir "$i")"
+exec docker compose exec postgres psql -U "$(env_get "$i" POSTGRES_USER || echo bdus)" -d "$db"
