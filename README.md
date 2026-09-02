@@ -14,7 +14,7 @@ view of the same thing. The **proxy VM is done by hand** following the runbook.
 
 ```bash
 sudo apt-get install -y git            # if needed
-git clone <your-private-remote>/bdus-ops.git /srv/bradypus/ops   # any path is fine
+git clone https://github.com/lad-sapienza/bdus-ops.git /srv/bradypus/ops   # any path is fine
 cd /srv/bradypus/ops
 cp config.env.example config.env && $EDITOR config.env           # set the paths / IPs
 sudo ln -s "$PWD/bin/bdus" /usr/local/bin/bdus
