@@ -6,3 +6,4 @@ config.env
 # stray backups if someone runs a script from inside the repo
 backups/
 *.log
+exports/

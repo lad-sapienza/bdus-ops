@@ -116,6 +116,37 @@ app — it is used only here and by `bdus backup` (`pg_dumpall` includes roles).
 Lists `projects/*` in each instance with engine and (pgsql) database name, read
 from each app's `config.json`.
 
+## `bdus app export <instance> <app> [--out FILE]`
+
+Bundles a single app into one portable archive (`<app>-<instance>-<ts>.bdusapp.tgz`
+in `<instance>/exports/`, or `--out`):
+
+- `manifest` — `app`, `engine`, `db_name`, `db_user`, `source_instance`, `bdus_version`, `exported_at`
+- `files.tar.gz` — `projects/<app>/` from the volume (`config.json`, `.jwt_secret`, `files/`, and for sqlite `db/bdus.sqlite`), via `docker-backup.sh <app>`
+- `db.dump` — for pgsql, `pg_dump -Fc` of the app's database (data + users)
+
+An app is self-contained, so the archive is everything. Hot export: `pg_dump` is
+a consistent snapshot; `files/` is captured as-is.
+
+## `bdus app import <instance> <archive> [--force] [--new-jwt]`
+
+The reverse — into the same or a **different** instance (target `bdus_version`
+should be ≥ the source):
+
+1. extracts `projects/<app>/` via `docker-restore.sh` (files not in the archive
+   are left alone)
+2. for pgsql: reads `db_name` / `db_username` / `db_password` from the restored
+   `config.json`, creates the role (`CREATE ROLE … LOGIN PASSWORD`, from that
+   cleartext) and database (`OWNER`, `REVOKE CONNECT FROM PUBLIC`) if missing,
+   then `pg_restore --no-owner --role=<user>`
+3. `--new-jwt` deletes `.jwt_secret` (regenerated on next login) — use when
+   cloning to a different site
+4. no restart; BraDypUS serves `projects/<app>/` on the next request
+
+`--force` replaces an app that already exists on the target (drops its dir and,
+for pgsql, its database and role first). PostGIS or other extensions must
+pre-exist on the target server.
+
 ## `bdus logs <instance> [args…]`
 
 `cd <instance> && docker compose logs "$@"`. e.g. `bdus logs prod -f --tail=200`.

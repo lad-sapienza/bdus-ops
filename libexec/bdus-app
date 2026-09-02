@@ -1,21 +1,42 @@
 #!/usr/bin/env bash
-# bdus app add  <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--password-stdin]
-# bdus app list [instance|all]
+# bdus app add    <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--db-user R] [--password-stdin]
+# bdus app list   [instance|all]
+# bdus app export <instance> <app> [--out FILE]
+# bdus app import <instance> <archive> [--force] [--new-jwt]
 #
-# `add` wraps vendor/add-app.sh (which itself calls bin/create-app.php inside
-# the api container — no HTTP, no BRADYPUS_ALLOW_NEW_APP toggle). Requires the
-# api image >= 5.4.6.
+# add    — wraps vendor/add-app.sh → bin/create-app.php in the api container.
+#          Requires the api image >= 5.4.6 (>= 5.4.8 for the isolated pgsql role).
+# export — one portable archive of a single app: projects/<app>/ tree + (pgsql)
+#          a pg_dump of its database + a manifest. Lands in <instance>/exports/.
+# import — the reverse: extracts the tree, and for pgsql recreates the role and
+#          database from the credentials in the app's own config.json, then
+#          pg_restores. No container restart. Works into a different instance.
 set -euo pipefail
 . "$BDUS_OPS_DIR/lib/common.sh"
 
-action="${1:?usage: bdus app add|list ...}"; shift || true
+action="${1:?usage: bdus app add|list|export|import ...}"; shift || true
+
+# read four config.json fields of an app inside an instance's api container:
+# engine, db_name, db_username, db_password  (one per line, may be empty)
+app_cfg() {   # app_cfg <instance> <app>
+  dc "$1" exec -T -e A="$2" api php -r '
+    $f = "projects/".getenv("A")."/config.json";
+    $c = is_file($f) ? json_decode(file_get_contents($f), true) : null;
+    if (!is_array($c)) exit(3);
+    echo ($c["db_engine"]??"")."\n".($c["db_name"]??"")."\n".($c["db_username"]??"")."\n".($c["db_password"]??"")."\n";
+  ' 2>/dev/null
+}
+
+valid_app_name() { case "$1" in ''|*[!a-z0-9_]*) return 1 ;; *) return 0 ;; esac; }
 
 case "$action" in
+
   add)
     inst="${1:?bdus app add <instance> --name ... --engine ... --email ...}"; shift
     instance_known "$inst" || die "unknown instance '$inst'"
     exec "$BDUS_OPS_DIR/vendor/add-app.sh" "$(instance_dir "$inst")" "$@"
     ;;
+
   list)
     while read -r i; do
       [ -f "$(instance_dir "$i")/.env" ] || continue
@@ -31,6 +52,117 @@ case "$action" in
       ' 2>/dev/null || warn "  ($i not running)"
     done < <(resolve_instances "${1:-all}")
     ;;
-  -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) die "unknown action '$action' (add|list)" ;;
+
+  export)
+    inst="${1:?bdus app export <instance> <app> [--out FILE]}"; app="${2:?missing <app>}"; shift 2 || true
+    out=""
+    while [ $# -gt 0 ]; do case "$1" in
+      --out) out="${2:?}"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac; done
+    instance_known "$inst" || die "unknown instance '$inst'"
+    valid_app_name "$app" || die "bad app name '$app'"
+
+    { read -r eng; read -r dbname; read -r dbuser; read -r _dbpass; } < <(app_cfg "$inst" "$app") || true
+    [ -n "$eng" ] || die "app '$app' not found on '$inst' (is it running?)"
+
+    ts="$(date +%Y%m%d-%H%M%S)"
+    expdir="$(instance_dir "$inst")/exports"; mkdir -p "$expdir"
+    [ -n "$out" ] || out="$expdir/${app}-${inst}-${ts}.bdusapp.tgz"
+
+    work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+    info "export $inst/$app ($eng) → $out"
+
+    dc "$inst" exec -T api /usr/local/bin/docker-backup.sh "$app" > "$work/files.tar.gz"
+    ok "  files.tar.gz  ($(du -h "$work/files.tar.gz" | cut -f1))"
+
+    if [ "$eng" = pgsql ]; then
+      dc "$inst" exec -T postgres pg_dump -Fc -U "$(env_get "$inst" POSTGRES_USER)" -d "$dbname" > "$work/db.dump"
+      ok "  db.dump  ($(du -h "$work/db.dump" | cut -f1))  [database $dbname]"
+    fi
+
+    {
+      echo "app=$app"
+      echo "engine=$eng"
+      echo "db_name=$dbname"
+      echo "db_user=$dbuser"
+      echo "source_instance=$inst"
+      echo "bdus_version=$(instance_version "$inst" || true)"
+      echo "exported_at=$(date -Is)"
+    } > "$work/manifest"
+
+    ( cd "$work" && tar czf "$out" manifest files.tar.gz $( [ "$eng" = pgsql ] && echo db.dump ) )
+    ok "done → $out  ($(du -h "$out" | cut -f1))"
+    ;;
+
+  import)
+    inst="${1:?bdus app import <instance> <archive> [--force] [--new-jwt]}"; file="${2:?missing <archive>}"; shift 2 || true
+    force=0; newjwt=0
+    while [ $# -gt 0 ]; do case "$1" in
+      --force)   force=1; shift ;;
+      --new-jwt) newjwt=1; shift ;;
+      *) die "unknown option: $1" ;;
+    esac; done
+    instance_known "$inst" || die "unknown instance '$inst'"
+    [ -f "$file" ] || die "archive not found: $file"
+
+    work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+    tar xzf "$file" -C "$work"
+    [ -f "$work/manifest" ] || die "not a bdusapp archive (no manifest)"
+    mkey() { sed -n "s/^$1=//p" "$work/manifest" | head -1; }
+    app="$(mkey app)"; eng="$(mkey engine)"
+    valid_app_name "$app" || die "manifest has a bad app name '$app'"
+    [ -f "$work/files.tar.gz" ] || die "archive missing files.tar.gz"
+    [ "$eng" != pgsql ] || [ -f "$work/db.dump" ] || die "pgsql archive missing db.dump"
+
+    info "import '$app' ($eng) → $inst"
+
+    if dc "$inst" exec -T api test -d "projects/$app" 2>/dev/null; then
+      [ "$force" -eq 1 ] || die "app '$app' already exists on '$inst' — pass --force to replace it"
+      warn "replacing existing '$app' on '$inst'"
+      dc "$inst" exec -T -e A="$app" api sh -c 'rm -rf "projects/$A"'
+      if [ "$eng" = pgsql ]; then
+        su="$(env_get "$inst" POSTGRES_USER)"
+        { read -r _e; read -r odb; read -r ousr; read -r _p; } < <(app_cfg "$inst" "$app") || true
+        [ -z "${odb:-}" ] || dc "$inst" exec -T postgres psql -U "$su" -d postgres -q \
+          -c "DROP DATABASE IF EXISTS \"$odb\"" -c "DROP ROLE IF EXISTS \"$ousr\"" || true
+      fi
+    fi
+
+    # 1 — the projects/<app>/ tree
+    dc "$inst" exec -T api /usr/local/bin/docker-restore.sh < "$work/files.tar.gz"
+    ok "  projects/$app restored"
+
+    # 2 — pgsql: recreate role + db from the just-restored config.json, then load
+    if [ "$eng" = pgsql ]; then
+      su="$(env_get "$inst" POSTGRES_USER)"
+      { read -r _e; read -r dbname; read -r dbuser; read -r dbpass; } < <(app_cfg "$inst" "$app")
+      [ -n "$dbname" ] && [ -n "$dbuser" ] && [ -n "$dbpass" ] || die "config.json of '$app' lacks db_name/username/password"
+
+      if [ "$(dc "$inst" exec -T postgres psql -U "$su" -d postgres -tAqc "SELECT 1 FROM pg_roles WHERE rolname='$dbuser'" | tr -d '[:space:]')" != 1 ]; then
+        printf 'CREATE ROLE "%s" LOGIN PASSWORD %s;\n' "$dbuser" "'$dbpass'" \
+          | dc "$inst" exec -T postgres psql -U "$su" -d postgres -v ON_ERROR_STOP=1 -q
+        ok "  role '$dbuser' created"
+      fi
+      if [ "$(dc "$inst" exec -T postgres psql -U "$su" -d postgres -tAqc "SELECT 1 FROM pg_database WHERE datname='$dbname'" | tr -d '[:space:]')" != 1 ]; then
+        dc "$inst" exec -T postgres psql -U "$su" -d postgres -v ON_ERROR_STOP=1 -q \
+          -c "CREATE DATABASE \"$dbname\" OWNER \"$dbuser\"" \
+          -c "REVOKE CONNECT ON DATABASE \"$dbname\" FROM PUBLIC" \
+          -c "GRANT  CONNECT ON DATABASE \"$dbname\" TO \"$dbuser\""
+        ok "  database '$dbname' created (owner $dbuser)"
+      fi
+      dc "$inst" exec -T postgres pg_restore -U "$su" -d "$dbname" --no-owner --role="$dbuser" < "$work/db.dump"
+      ok "  database '$dbname' loaded"
+    fi
+
+    if [ "$newjwt" -eq 1 ]; then
+      dc "$inst" exec -T -e A="$app" api sh -c 'rm -f "projects/$A/.jwt_secret"'
+      ok "  .jwt_secret cleared (regenerated on next login)"
+    fi
+
+    ok "imported '$app' into '$inst' ($eng) — live, no restart"
+    ;;
+
+  -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown action '$action' (add|list|export|import)" ;;
 esac

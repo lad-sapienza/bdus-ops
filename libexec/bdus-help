@@ -26,8 +26,10 @@ Data
                           stop api → restore (latest by default) → start api
 
 Applications
-  app add <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X]
-  app list [inst|all]
+  app add    <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X]
+  app list   [inst|all]
+  app export <instance> <app> [--out FILE]      one portable archive (tree + pg_dump)
+  app import <instance> <archive> [--force] [--new-jwt]   the reverse, incl. into another instance
 
 Diagnostics
   doctor                  check the deploy invariants (.env perms, override, firewall rules,
