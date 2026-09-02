@@ -12,7 +12,7 @@ mappa i domini. Comandi eseguibili in ordine; ogni fase è indipendente e ripeti
 | VM proxy | **192.168.3.186** — nginx (< 1.25.1) + certbot, gestita a parte |
 | Istanza **prod** | bind **192.168.4.39:8081** · **/srv/bradypus/prod** · progetto **bdus-prod** · volumi **bdus-prod_projects_data** + **bdus-prod_pgdata** · **Postgres condiviso**, engine per-app (sqlite o pgsql) |
 | Istanza **demo** | bind **192.168.4.39:8082** · **/srv/bradypus/demo** · progetto **bdus-demo** · volume **bdus-demo_projects_data** · solo **sqlite** |
-| Versione | BraDypUS **5.4.7** (immagini GHCR pinnate) |
+| Versione | BraDypUS **5.4.8** (immagini GHCR pinnate) |
 | Nuove app | wizard HTTP → **sempre** `BRADYPUS_ALLOW_NEW_APP=1` (5.4.7) · `bdus app add` non apre finestra; pgsql = ruolo isolato per app (5.4.8) |
 | Domini (sul proxy) | **bdus.lad-sapienza.it** (prod) · **demo.bdus.lad-sapienza.it** (demo) · cert SAN unico · file vhost **senza** `.conf` |
 
@@ -139,6 +139,8 @@ sudo iptables -S DOCKER-USER      # deve mostrare le 2 regole DROP
 
 > **Nota** — Le regole in `DOCKER-USER` sopravvivono ai riavvii dei container e del daemon; il servizio le riapplica al boot. Dopo un raro `systemctl restart docker` manuale: `sudo systemctl restart bradypus-fw`. Se la rete privata è solo IPv4 non serve `ip6tables`.
 
+> **Con `bdus-ops`**: `bdus setup host` installa la versione equivalente come `bdus-fw.sh` / `bdus-fw.service` (scopre le porte dai `.env` a runtime, ammette gli IP in `PROXY_ALLOW_IPS`) e disabilita `bradypus-fw.service` se lo trova. Se hai già fatto le Fasi 02–03 a mano, o le rifai con `bdus setup host` (idempotente) o le lasci così.
+
 ## 04 · Aggiornamenti di sicurezza automatici  
 _Fase 04 VM APP_
 
@@ -190,7 +192,7 @@ cat > .env <<'EOF'
 COMPOSE_PROJECT_NAME=bdus-demo
 COMPOSE_FILE=bradypus.yml:bdus.override.yml
 
-BDUS_VERSION=5.4.7
+BDUS_VERSION=5.4.8
 BDUS_PORT=192.168.4.39:8082
 
 BRADYPUS_DEBUG=0
@@ -276,7 +278,7 @@ cat > .env <<'EOF'
 COMPOSE_PROJECT_NAME=bdus-prod
 COMPOSE_FILE=bradypus.yml:bdus.override.yml
 
-BDUS_VERSION=5.4.7
+BDUS_VERSION=5.4.8
 BDUS_PORT=192.168.4.39:8081
 
 BRADYPUS_DEBUG=0
@@ -366,88 +368,27 @@ ssh -L 8081:192.168.4.39:8081 debian@<host-ssh-vm-app>
 ## 10 · Backup automatici  
 _Fase 10 VM APP_
 
-Cosa contiene cosa: app **sqlite** → tutto nel tar di `projects_data`. App **pgsql** → il DB in `pg_dumpall`, i file/config/`.jwt_secret` nel tar. Quindi **demo** (solo sqlite) = tar; **prod** (engine misto) = tar **+** `pg_dumpall`.
-
-_/usr/local/sbin/bradypus-backup.sh — demo (tar projects_data)_
+Gestiti da **`bdus backup`** (in `bdus-ops`). Cosa contiene cosa: app **sqlite** → tutto nel tar di `projects_data` (`<progetto>-files-<ts>.tar.gz`); app **pgsql** → i database + ruoli in `<progetto>-pgall-<ts>.sql.gz` (`pg_dumpall` via il superuser `bdus`), i file/config/`.jwt_secret` nel tar. `bdus backup` sceglie la strategia per istanza, tiene gli ultimi `BACKUP_RETENTION`, e fa l'rsync off-box se `BACKUP_RSYNC_TARGET` è settato in `config.env`.
 
 ```bash
-sudo tee /usr/local/sbin/bradypus-backup.sh >/dev/null <<'EOF'
-#!/bin/sh
-# uso: bradypus-backup.sh /srv/bradypus/<istanza> [nome_app]
-set -eu
-INSTDIR="$1"; APP="${2:-}"
-. "$INSTDIR/.env"
-VOL="${COMPOSE_PROJECT_NAME}_projects_data"
-IMG="ghcr.io/lad-sapienza/bdus-api:${BDUS_VERSION:-latest}"
-DEST="$INSTDIR/backups"; TS="$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$DEST"
-OUT="$DEST/${COMPOSE_PROJECT_NAME}${APP:+-$APP}-${TS}.tar.gz"
-docker run --rm --entrypoint /usr/local/bin/docker-backup.sh \
-  -v "${VOL}:/var/www/html/projects" "$IMG" ${APP:+"$APP"} > "$OUT.tmp"
-mv "$OUT.tmp" "$OUT"
-ls -1t "$DEST/${COMPOSE_PROJECT_NAME}"-*.tar.gz 2>/dev/null | tail -n +15 | xargs -r rm -f
-echo "$OUT"
-EOF
-sudo chmod +x /usr/local/sbin/bradypus-backup.sh
-/usr/local/sbin/bradypus-backup.sh /srv/bradypus/demo
+bdus backup all            # o: bdus backup prod  /  bdus backup demo
 ```
 
-_/usr/local/sbin/bradypus-backup-prod.sh — prod (pg_dumpall + tar)_
+Cron (il repo ha il sample):
 
 ```bash
-sudo tee /usr/local/sbin/bradypus-backup-prod.sh >/dev/null <<'EOF'
-#!/bin/sh
-set -eu
-INSTDIR=/srv/bradypus/prod
-cd "$INSTDIR"; . ./.env
-DEST="$INSTDIR/backups"; TS="$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$DEST"
-
-# 1) TUTTI i database Postgres + ruoli
-docker compose exec -T postgres pg_dumpall -U "$POSTGRES_USER" \
-  | gzip > "$DEST/${COMPOSE_PROJECT_NAME}-pgall-${TS}.sql.gz"
-
-# 2) volume projects_data: db sqlite, config.json, .jwt_secret, files/ di ogni app
-docker run --rm --entrypoint /usr/local/bin/docker-backup.sh \
-  -v "${COMPOSE_PROJECT_NAME}_projects_data:/var/www/html/projects" \
-  "ghcr.io/lad-sapienza/bdus-api:${BDUS_VERSION:-latest}" \
-  > "$DEST/${COMPOSE_PROJECT_NAME}-files-${TS}.tar.gz"
-
-for k in pgall files; do
-  ls -1t "$DEST/${COMPOSE_PROJECT_NAME}-${k}-"* 2>/dev/null | tail -n +15 | xargs -r rm -f
-done
-echo "OK  $DEST/${COMPOSE_PROJECT_NAME}-{pgall,files}-${TS}.*"
-EOF
-sudo chmod +x /usr/local/sbin/bradypus-backup-prod.sh
-/usr/local/sbin/bradypus-backup-prod.sh
+sudo cp /srv/bradypus/ops/etc/cron.d/bdus-backup /etc/cron.d/bdus-backup
+# nel file: l'utente della riga cron dev'essere 'debian' (chi possiede il deploy), non root
 ```
 
-_/etc/cron.d/bradypus-backup_
+> **Se vieni dalla vecchia procedura** (script `/usr/local/sbin/bradypus-backup*.sh` + `/etc/cron.d/bradypus-backup`): gli archivi hanno lo stesso nome/formato, quindi sono compatibili. Ritira i vecchi:
+> ```bash
+> sudo rm -f /usr/local/sbin/bradypus-backup.sh /usr/local/sbin/bradypus-backup-prod.sh /etc/cron.d/bradypus-backup
+> ```
 
-```bash
-sudo tee /etc/cron.d/bradypus-backup >/dev/null <<'EOF'
-# m  h dom mon dow user  comando
-15 2  *   *   *  root  /usr/local/sbin/bradypus-backup-prod.sh >> /var/log/bradypus-backup.log 2>&1
-30 2  *   *   *  root  /usr/local/sbin/bradypus-backup.sh /srv/bradypus/demo >> /var/log/bradypus-backup.log 2>&1
-# copia FUORI dalla VM (adatta destinazione):
-45 2  *   *   *  root  rsync -a --delete /srv/bradypus/prod/backups/ backup@storage:/backups/bdus-prod/
-EOF
-```
+> **Attenzione** — `.jwt_secret` **e** (per app pgsql) la password del ruolo in chiaro in `config.json` sono negli archivi: proteggi la destinazione come dato sensibile.
 
-> **Attenzione** — `.jwt_secret` **e** le credenziali Postgres in chiaro (in `config.json`) sono negli archivi: proteggi la destinazione come dato sensibile.
-
-_restore prod completo (DR, volume Postgres fresco)_
-
-```bash
-cd /srv/bradypus/prod
-docker compose stop api
-gunzip -c backups/bdus-prod-pgall-AAAAMMGG-HHMMSS.sql.gz \
-  | docker compose exec -T postgres psql -U bdus -d postgres
-docker run --rm -i --entrypoint /usr/local/bin/docker-restore.sh \
-  -v bdus-prod_projects_data:/var/www/html/projects \
-  ghcr.io/lad-sapienza/bdus-api:5.4.7 < backups/bdus-prod-files-AAAAMMGG-HHMMSS.tar.gz
-docker compose start api
-```
+**Restore**: `bdus restore <prod|demo>` (ferma `api` → ripristina l'ultimo backup, pgall + tar per prod → riavvia `api`). DR completo su volume Postgres fresco: `bdus init prod` e poi `bdus restore prod`.
 
 ## 11 · Verifica finale sulla VM app  
 _Fase 11 VM APP_
@@ -622,22 +563,13 @@ Nel browser: login su prod, nessun avviso mixed-content, upload di un file > 2 M
 ## 15 · Aggiornare BraDypUS  
 _Fase 15 ESERCIZIO_
 
-Prima la demo, poi — verificata — la prod. Il volume dati non viene toccato.
-
 ```bash
-cd /srv/bradypus/demo
-sed -i 's/^BDUS_VERSION=.*/BDUS_VERSION=5.5.0/' .env   # nuova versione
-docker compose pull && docker compose up -d
-docker compose logs --tail=30
-
-# solo dopo la verifica sulla demo:
-/usr/local/sbin/bradypus-backup-prod.sh                 # backup PRIMA del bump
-cd /srv/bradypus/prod
-sed -i 's/^BDUS_VERSION=.*/BDUS_VERSION=5.5.0/' .env
-docker compose pull && docker compose up -d
+bdus update all 5.5.0
 ```
 
-> **Attenzione** — Al primo request dopo un cambio di versione BraDypUS esegue le **migrazioni** del DB (per ogni app, sqlite e pgsql). Il backup di prod va fatto **prima** del `up -d`.
+`bdus update` fa tutto in ordine: verifica che il tag esista su GHCR → **demo prima**, health check, conferma → **backup di prod** → `sed .env` + `pull` + `up -d` → poll health; se prod non torna su, ripristina il pin `.env` (il DB **non** viene rollbackato: le migrazioni per la nuova versione potrebbero essere già girate — in quel caso `bdus restore prod`).
+
+> **Attenzione** — Al primo request dopo un cambio di versione BraDypUS esegue le **migrazioni** del DB (per ogni app). `bdus update` fa il backup di prod *prima* dell'`up -d` automaticamente; se aggiorni a mano, fallo tu.
 
 ## + · Aggiungere un'app (sqlite o pgsql)  
 _Ricorrente ESERCIZIO_
@@ -684,26 +616,19 @@ docker compose up -d
 ## 16 · Restore e note operative  
 _Fase 16 ESERCIZIO_
 
-Restore **prod completo**: vedi Fase 10 (`pg_dumpall` + tar). Restore **demo** (o una singola app sqlite):
-
-_restore demo_
-
 ```bash
-cd /srv/bradypus/demo
-docker compose stop api
-docker run --rm -i --entrypoint /usr/local/bin/docker-restore.sh \
-  -v bdus-demo_projects_data:/var/www/html/projects \
-  ghcr.io/lad-sapienza/bdus-api:5.4.7 \
-  < backups/bdus-demo-AAAAMMGG-HHMMSS.tar.gz
-docker compose start api
+bdus restore prod            # ultimo backup: pgall + tar. Chiede conferma.
+bdus restore demo            # solo tar. --db F / --files F per un archivio preciso.
 ```
 
-- `docker compose logs -f` — log in diretta (capped a 10m×3 dal `daemon.json`).
+Ferma `api` → ripristina → riavvia `api` → attende health. DR completo su volume Postgres nuovo: `bdus init prod` e poi `bdus restore prod`. I file non presenti nell'archivio restano; il restore Postgres ricrea i database come dumpati.
+
+- `bdus logs prod -f` — log in diretta (capped a 10m×3 dal `daemon.json`).
 - `docker compose down` conserva il volume · `down -v` lo **distrugge**: mai su prod.
 - `seed-demo.sh` (dataset dimostrativo) richiede il repo clonato e `BASE_URL` puntato a `http://192.168.4.39:8082`; funziona perché la demo ha `ALLOW_NEW_APP=1`.
 - Revoca sessioni di un utente: endpoint `revokeToken` lato app (incrementa `token_version`) — non serve toccare i container.
 
 ---
 
-_BraDypUS v5.4.7 · runbook aggiornato il 2026-09-02 · immagini ghcr.io/lad-sapienza/bdus-api · bdus-app_
+_BraDypUS v5.4.8 · runbook aggiornato il 2026-09-02 · immagini ghcr.io/lad-sapienza/bdus-api · bdus-app_
 
