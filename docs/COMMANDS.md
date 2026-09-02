@@ -89,12 +89,27 @@ and `--no-rsync` is not given, `rsync -a --delete` the folder to
 For a full disaster-recovery restore into a fresh Postgres volume, `bdus init`
 the instance first, then `bdus restore`.
 
-## `bdus app add <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--password-stdin]`
+## `bdus app add <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--db-user R] [--password-stdin]`
 
 Wraps `vendor/add-app.sh` → `bin/create-app.php` inside the `api` container: no
-HTTP, no `BRADYPUS_ALLOW_NEW_APP` toggle, no restart, no window. For `pgsql` it
-creates `bdus_<slug>` on the `postgres` service if missing. Admin password:
+HTTP, no `BRADYPUS_ALLOW_NEW_APP` toggle, no restart, no window. Admin password:
 hidden prompt, or `--password-stdin`. **Requires the api image ≥ 5.4.6.**
+
+For `pgsql` (image ≥ 5.4.8) it provisions an **isolated** role, as the shared
+superuser (`POSTGRES_USER` in the instance `.env`):
+
+```
+CREATE ROLE "<slug>" LOGIN PASSWORD <generated>   -- no superuser, no createdb
+CREATE DATABASE "<slug>" OWNER "<slug>"
+REVOKE CONNECT ON DATABASE "<slug>" FROM PUBLIC;  GRANT CONNECT ... TO "<slug>"
+```
+
+and hands only that role to the app. The generated password is printed once and
+stored (by BraDypUS) in `projects/<slug>/config.json` only. `--db-name`
+overrides the database name (default `<slug>`, no prefix); `--db-user
+<existing-role>` (+ `BDUS_DB_PASS`) reuses a role you manage yourself. Refuses
+if the app, role, or database already exists. The superuser never reaches the
+app — it is used only here and by `bdus backup` (`pg_dumpall` includes roles).
 
 ## `bdus app list [instance|all]`
 

@@ -13,7 +13,7 @@ mappa i domini. Comandi eseguibili in ordine; ogni fase è indipendente e ripeti
 | Istanza **prod** | bind **192.168.4.39:8081** · **/srv/bradypus/prod** · progetto **bdus-prod** · volumi **bdus-prod_projects_data** + **bdus-prod_pgdata** · **Postgres condiviso**, engine per-app (sqlite o pgsql) |
 | Istanza **demo** | bind **192.168.4.39:8082** · **/srv/bradypus/demo** · progetto **bdus-demo** · volume **bdus-demo_projects_data** · solo **sqlite** |
 | Versione | BraDypUS **5.4.7** (immagini GHCR pinnate) |
-| Nuove app | **sempre** dietro `BRADYPUS_ALLOW_NEW_APP=1` (5.4.7) · `add-app.sh` non apre finestra |
+| Nuove app | wizard HTTP → **sempre** `BRADYPUS_ALLOW_NEW_APP=1` (5.4.7) · `bdus app add` non apre finestra; pgsql = ruolo isolato per app (5.4.8) |
 | Domini (sul proxy) | **bdus.lad-sapienza.it** (prod) · **demo.bdus.lad-sapienza.it** (demo) · cert SAN unico · file vhost **senza** `.conf` |
 
 L'ordine conta: **firewall prima dei container**.
@@ -347,12 +347,12 @@ curl -sS -o /dev/null -w 'http %{http_code}\n' http://192.168.4.39:8081/
 ## 09 · Creare la prima applicazione di prod  
 _Fase 09 VM APP_
 
-Modo più semplice — **senza finestra**, senza wizard (immagine ≥ 5.4.6):
+Modo più semplice — **senza finestra**, senza wizard:
 
 ```bash
-./add-app.sh /srv/bradypus/prod --name siti_scavo --engine pgsql --email admin@lad-sapienza.it
+bdus app add prod --name siti_scavo --engine pgsql --email admin@lad-sapienza.it
 # sqlite: --engine sqlite  (niente altro)
-# pgsql: crea da sé il database bdus_siti_scavo sul servizio postgres
+# pgsql : crea ruolo isolato + database "siti_scavo" (vedi "Aggiungere un'app")
 ```
 
 In alternativa, il wizard (richiede la finestra `ALLOW_NEW_APP=1`, primo app incluso — vedi **"Aggiungere un'app"** in Parte C). Per arrivarci prima che il vhost pubblico esista:
@@ -642,43 +642,44 @@ docker compose pull && docker compose up -d
 ## + · Aggiungere un'app (sqlite o pgsql)  
 _Ricorrente ESERCIZIO_
 
-Poco frequente. Da 5.4.7 la creazione richiede **sempre** `ALLOW_NEW_APP=1`, ma `add-app.sh` (immagine ≥ 5.4.6) non ha bisogno di aprire nessuna finestra.
+Poco frequente. Da 5.4.7 la creazione HTTP richiede **sempre** `ALLOW_NEW_APP=1`, ma `add-app.sh` (immagine ≥ 5.4.6, isolamento ruolo da 5.4.8) non apre nessuna finestra.
 
-**Consigliato — `add-app.sh`**
+**Consigliato — `bdus app add`** (avvolge `add-app.sh`):
 
 ```bash
-# scaricalo una volta accanto ai file dell'istanza
-curl -O https://raw.githubusercontent.com/lad-sapienza/BraDypUS/v5/add-app.sh
-chmod +x add-app.sh
-
-./add-app.sh /srv/bradypus/prod --name siti_scavo --engine pgsql --email admin@lad-sapienza.it
+bdus app add prod --name siti_scavo --engine pgsql --email admin@lad-sapienza.it
 # sqlite:  --engine sqlite   (niente credenziali DB)
 ```
 
-Legge il `.env` dell'istanza; per pgsql crea da sé il database `bdus_<nome>` sul servizio `postgres` se manca, poi lancia `bin/create-app.php` dentro `api` (password admin da prompt nascosto o `--password-stdin`; password DB via env, mai in `ps`). Nessun restart, nessuna finestra.
+Per pgsql provisiona, come superuser `bdus` (che resta solo per ops/backup):
 
-**Alternativa — wizard (con finestra)**
+```
+CREATE ROLE "siti_scavo" LOGIN PASSWORD <generata>   -- niente superuser/createdb
+CREATE DATABASE "siti_scavo" OWNER "siti_scavo"
+REVOKE CONNECT ON DATABASE "siti_scavo" FROM PUBLIC;  GRANT CONNECT ... TO "siti_scavo"
+```
+
+poi `bin/create-app.php` dentro `api` con quel ruolo (password DB via env, mai in `ps`; password admin da prompt nascosto o `--password-stdin`). La password del ruolo è stampata una volta e finisce solo in `projects/siti_scavo/config.json`. `--db-name` per cambiare il nome del DB; `--db-user <ruolo-esistente>` (+ `BDUS_DB_PASS`) per riusare un ruolo che gestisci a mano. Rifiuta se app/ruolo/DB esistono già.
+
+**Alternativa — wizard (con finestra)** — usare `add-app.sh` è meglio; se proprio serve il wizard, prepara **a mano** ruolo+DB isolati prima:
 
 ```bash
 cd /srv/bradypus/prod
+docker compose exec postgres psql -U bdus -d postgres <<'SQL'
+CREATE ROLE "NOMEAPP" LOGIN PASSWORD 'scegli-una-password';
+CREATE DATABASE "NOMEAPP" OWNER "NOMEAPP";
+REVOKE CONNECT ON DATABASE "NOMEAPP" FROM PUBLIC;
+GRANT  CONNECT ON DATABASE "NOMEAPP" TO "NOMEAPP";
+SQL
+
 sed -i 's/^BRADYPUS_ALLOW_NEW_APP=0/BRADYPUS_ALLOW_NEW_APP=1/' .env
-docker compose up -d          # ricrea solo 'api'
-
-# solo pgsql — crea il database:
-docker compose exec postgres psql -U bdus -d postgres -c \
-  "CREATE DATABASE bdus_NOMEAPP OWNER bdus;"
-
-# https://bdus.lad-sapienza.it/  (o tunnel SSH → http://localhost:8081/)  → Crea nuova applicazione
-#   sqlite: Engine=SQLite, nient'altro
-#   pgsql : Host=postgres  Port=5432  DB name=bdus_NOMEAPP  Username=bdus  Password=$POSTGRES_PASSWORD
-
-# richiudi:
+docker compose up -d
+# wizard: Engine=PostgreSQL · Host=postgres · Port=5432 · DB=NOMEAPP · User=NOMEAPP · Password=<quella scelta>
 sed -i 's/^BRADYPUS_ALLOW_NEW_APP=1/BRADYPUS_ALLOW_NEW_APP=0/' .env
 docker compose up -d
-curl -sS 'http://192.168.4.39:8081/api/new-app/status'; echo   # "permitted":false
 ```
 
-> **Backup & rimozione** — `bradypus-backup-prod.sh` copre la nuova app senza modifiche (sqlite → nel tar; pgsql → in `pg_dumpall`) — fai un backup manuale subito dopo. Eliminando un'app pgsql dalla UI il database resta: `docker compose exec postgres psql -U bdus -d postgres -c 'DROP DATABASE bdus_NOMEAPP;'`
+> **Backup & rimozione** — `bdus backup` copre la nuova app senza modifiche (sqlite → nel tar; pgsql → in `pg_dumpall`, che dumpa ruoli inclusi) — fai un backup manuale subito dopo. Eliminando un'app pgsql dalla UI restano DB e ruolo: `docker compose exec postgres psql -U bdus -c 'DROP DATABASE IF EXISTS "NOMEAPP"; DROP ROLE IF EXISTS "NOMEAPP";'`
 
 ## 16 · Restore e note operative  
 _Fase 16 ESERCIZIO_
