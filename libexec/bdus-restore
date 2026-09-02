@@ -29,7 +29,7 @@ proj="$(instance_project "$inst")" || die "$inst: no .env"
 dest="$(backup_dir "$inst")"
 has_pg=0; instance_has_pg "$inst" && has_pg=1
 
-latest() { ls -1t "$dest/$1" 2>/dev/null | head -1; }
+latest() { local f; f="$(ls -1t "$dest/"$1 2>/dev/null | head -1)" || true; printf '%s' "$f"; }
 [ -n "$filesf" ] || filesf="$(latest "${proj}-files-*.tar.gz")"
 [ -n "$filesf" ] || die "no files archive in $dest (pass --files)"
 [ -f "$filesf" ] || die "not found: $filesf"

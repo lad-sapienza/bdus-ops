@@ -25,7 +25,7 @@ grn(){ printf '\033[32m✓\033[0m %s\n' "$*"; }
 inf(){ printf '\033[36m%s\033[0m\n' "$*"; }
 
 # ── docker: group + boot ───────────────────────────────────────────────────
-if [ -n "$USR" ] && ! id -nG "$USR" | tr ' ' '\n' | grep -qx docker; then
+if [ -n "$USR" ] && ! grep -qx docker < <(id -nG "$USR" | tr ' ' '\n'); then
   usermod -aG docker "$USR"; grn "added $USR to the docker group (re-login to take effect)"
 fi
 systemctl enable --now docker containerd >/dev/null 2>&1 || true
@@ -53,7 +53,7 @@ if [ "$DO_UFW" -eq 1 ]; then
   ufw --force default deny incoming  >/dev/null
   ufw --force default allow outgoing >/dev/null
   ufw allow OpenSSH >/dev/null
-  ufw status | grep -q '^Status: active' || ufw --force enable >/dev/null
+  grep -q '^Status: active' < <(ufw status) || ufw --force enable >/dev/null
   grn "ufw active (SSH allowed; container ports handled by DOCKER-USER below)"
 fi
 
@@ -104,6 +104,14 @@ EOF
 systemctl daemon-reload
 systemctl enable --now bdus-fw.service >/dev/null
 grn "bdus-fw.sh + bdus-fw.service (allow: ${ALLOW:-<none set>})"
+
+# supersede a hand-installed runbook firewall unit, if present
+if systemctl list-unit-files --no-legend 2>/dev/null | grep -q '^bradypus-fw\.service'; then
+  systemctl disable --now bradypus-fw.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/bradypus-fw.service /usr/local/sbin/bradypus-fw.sh
+  systemctl daemon-reload
+  grn "disabled the old bradypus-fw.service (replaced by bdus-fw.service)"
+fi
 
 # ── instances root ─────────────────────────────────────────────────────────
 mkdir -p "$ROOT"

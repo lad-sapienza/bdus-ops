@@ -87,8 +87,15 @@ dc() {   # dc <instance> <compose args...>
   ( cd "$d" && docker compose "$@" )
 }
 
-instance_has_pg() {   # 0 if the merged compose defines a 'postgres' service
-  dc "$1" config --services 2>/dev/null | grep -qx postgres
+instance_has_pg() {   # 0 if this instance runs Postgres
+  # config.env is authoritative; fall back to compose introspection (capture,
+  # never pipe into grep -q under pipefail).
+  local flag; flag="$(cfg_instance "$1" POSTGRES)"
+  [ "$flag" = 1 ] && return 0
+  [ "$flag" = 0 ] && return 1
+  local svcs=""
+  svcs="$( ( cd "$(instance_dir "$1")" 2>/dev/null && docker compose config --services ) 2>/dev/null )" || true
+  printf '%s\n' "$svcs" | grep -qx postgres
 }
 
 instance_project() { env_get "$1" COMPOSE_PROJECT_NAME; }
