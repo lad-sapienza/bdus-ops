@@ -17,7 +17,7 @@ sudo apt-get install -y git            # if needed
 git clone <your-private-remote>/bdus-ops.git /srv/bradypus/ops   # any path is fine
 cd /srv/bradypus/ops
 cp config.env.example config.env && $EDITOR config.env           # set the paths / IPs
-sudo ln -s "$PWD/bin/bdus" /usr/local/sbin/bdus
+sudo ln -s "$PWD/bin/bdus" /usr/local/bin/bdus
 
 bdus help
 ```
@@ -66,7 +66,7 @@ Full flag reference: [`docs/COMMANDS.md`](docs/COMMANDS.md).
 ## Layout
 
 ```
-bin/bdus            dispatcher (symlink this to /usr/local/sbin/bdus)
+bin/bdus            dispatcher (symlink this to /usr/local/bin/bdus)
 lib/common.sh       config load + helpers, sourced by every subcommand
 setup/host.sh       `bdus setup host`
 libexec/bdus-*      one file per subcommand (each prints its own --help)

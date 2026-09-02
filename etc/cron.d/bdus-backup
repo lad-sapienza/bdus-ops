@@ -8,6 +8,6 @@
 # does the off-box rsync if BACKUP_RSYNC_TARGET is set in config.env.
 
 SHELL=/bin/bash
-15 2 * * *  debian  /usr/local/sbin/bdus backup all  >> /var/log/bdus-backup.log 2>&1
+15 2 * * *  debian  /usr/local/bin/bdus backup all  >> /var/log/bdus-backup.log 2>&1
 # optional heartbeat: mail yourself if anything is wrong
-# 5  8 * * *  debian  /usr/local/sbin/bdus status || echo "bdus status FAILED on $(hostname)"
+# 5  8 * * *  debian  /usr/local/bin/bdus status || echo "bdus status FAILED on $(hostname)"
