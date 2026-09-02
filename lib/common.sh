@@ -106,7 +106,7 @@ backup_dir()       { printf '%s/backups' "$(instance_dir "$1")"; }
 instance_health() {   # 0 if the published endpoint answers 2xx
   local hp; hp="$(env_get "$1" BDUS_PORT || true)"
   [ -n "$hp" ] || return 2
-  curl -fsS --max-time 5 -o /dev/null "http://${hp}${HEALTH_PATH}"
+  curl -fs --max-time 5 -o /dev/null "http://${hp}${HEALTH_PATH}"
 }
 
 wait_health() {   # wait_health <instance> [seconds]

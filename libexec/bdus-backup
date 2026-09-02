@@ -46,12 +46,11 @@ while read -r i; do
     fi
   fi
 
-  # 3 — retention
+  # 3 — retention (no match for a given kind → glob fails; keep going)
   for kind in files pgall; do
     # shellcheck disable=SC2012
-    ls -1t "$dest/${proj}-${kind}-"* 2>/dev/null | tail -n +"$((BACKUP_RETENTION + 1))" | while read -r old; do
-      rm -f "$old"
-    done
+    ls -1t "$dest/${proj}-${kind}-"* 2>/dev/null | tail -n +"$((BACKUP_RETENTION + 1))" \
+      | while read -r old; do rm -f "$old"; done || true
   done
 
   # 4 — off-box copy
