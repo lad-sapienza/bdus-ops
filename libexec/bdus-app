@@ -3,6 +3,7 @@
 # bdus app list   [instance|all]
 # bdus app export <instance> <app> [--out FILE]
 # bdus app import <instance> <archive> [--force] [--new-jwt]
+# bdus app delete <instance> <app> [--yes] [--no-backup] [--keep-role]
 #
 # add    — wraps vendor/add-app.sh → bin/create-app.php in the api container.
 #          Requires the api image >= 5.4.6 (>= 5.4.8 for the isolated pgsql role).
@@ -11,10 +12,14 @@
 # import — the reverse: extracts the tree, and for pgsql recreates the role and
 #          database from the credentials in the app's own config.json, then
 #          pg_restores. No container restart. Works into a different instance.
+# delete — rm -rf projects/<app> and, for pgsql, DROP DATABASE WITH (FORCE) +
+#          DROP ROLE (unless it is the shared POSTGRES_USER, or --keep-role).
+#          Exports a safety copy first (skip with --no-backup); asks you to type
+#          the app name (skip with --yes).
 set -euo pipefail
 . "$BDUS_OPS_DIR/lib/common.sh"
 
-action="${1:?usage: bdus app add|list|export|import ...}"; shift || true
+action="${1:?usage: bdus app add|list|export|import|delete ...}"; shift || true
 
 # read four config.json fields of an app inside an instance's api container:
 # engine, db_name, db_username, db_password  (one per line, may be empty)
@@ -163,6 +168,66 @@ case "$action" in
     ok "imported '$app' into '$inst' ($eng) — live, no restart"
     ;;
 
-  -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) die "unknown action '$action' (add|list|export|import)" ;;
+  delete|rm)
+    inst="${1:?bdus app delete <instance> <app> [--yes] [--no-backup] [--keep-role]}"; app="${2:?missing <app>}"; shift 2 || true
+    yes=0; nobackup=0; keeprole=0
+    while [ $# -gt 0 ]; do case "$1" in
+      --yes|-y)    yes=1; shift ;;
+      --no-backup) nobackup=1; shift ;;
+      --keep-role) keeprole=1; shift ;;
+      *) die "unknown option: $1" ;;
+    esac; done
+    instance_known "$inst" || die "unknown instance '$inst'"
+    valid_app_name "$app" || die "bad app name '$app'"
+
+    { read -r eng; read -r dbname; read -r dbuser; read -r _p; } < <(app_cfg "$inst" "$app") || true
+    [ -n "$eng" ] || die "app '$app' not found on '$inst'"
+    su="$(env_get "$inst" POSTGRES_USER || true)"
+
+    say ""
+    warn "DELETE $inst/$app ($eng) — irreversible"
+    say "  rm -rf projects/$app"
+    if [ "$eng" = pgsql ]; then
+      say "  DROP DATABASE \"$dbname\" WITH (FORCE)"
+      if [ "$keeprole" -ne 1 ] && [ -n "$dbuser" ] && [ "$dbuser" != "$su" ]; then
+        say "  DROP ROLE \"$dbuser\""
+      else
+        say "  (role \"$dbuser\" kept)"
+      fi
+    fi
+    say ""
+
+    if [ "$nobackup" -ne 1 ]; then
+      info "exporting first (safety copy)…"
+      "$BDUS_OPS_DIR/libexec/bdus-app" export "$inst" "$app" || die "export failed — aborting delete"
+    else
+      warn "--no-backup: nothing will be recoverable"
+    fi
+
+    if [ "$yes" -ne 1 ]; then
+      printf 'Type the app name "%s" to confirm: ' "$app" >&2
+      read -r ans </dev/tty 2>/dev/null || read -r ans || true
+      [ "$ans" = "$app" ] || { info "aborted"; exit 0; }
+    fi
+
+    dc "$inst" exec -T -e A="$app" api sh -c '[ -n "$A" ] && rm -rf "projects/$A"'
+    ok "  projects/$app removed"
+
+    if [ "$eng" = pgsql ] && [ -n "$dbname" ]; then
+      dc "$inst" exec -T postgres psql -U "$su" -d postgres -q -c "DROP DATABASE IF EXISTS \"$dbname\" WITH (FORCE)"
+      ok "  database '$dbname' dropped"
+      if [ "$keeprole" -ne 1 ] && [ -n "$dbuser" ] && [ "$dbuser" != "$su" ]; then
+        if dc "$inst" exec -T postgres psql -U "$su" -d postgres -q -c "DROP ROLE IF EXISTS \"$dbuser\""; then
+          ok "  role '$dbuser' dropped"
+        else
+          warn "  could not drop role '$dbuser' (still owns objects elsewhere?) — drop it by hand"
+        fi
+      fi
+    fi
+
+    ok "deleted '$app' from '$inst'"
+    ;;
+
+  -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown action '$action' (add|list|export|import|delete)" ;;
 esac

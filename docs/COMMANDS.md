@@ -147,6 +147,20 @@ should be ≥ the source):
 for pgsql, its database and role first). PostGIS or other extensions must
 pre-exist on the target server.
 
+## `bdus app delete <instance> <app> [--yes] [--no-backup] [--keep-role]`
+
+Removes a single app. Irreversible.
+
+1. **`bdus app export` first** into `<instance>/exports/` (skip with `--no-backup`)
+2. prompts you to **type the app name** to confirm (skip with `--yes`)
+3. `rm -rf projects/<app>` in the api container
+4. for pgsql: `DROP DATABASE "<db_name>" WITH (FORCE)` (terminates live
+   connections), then `DROP ROLE "<db_user>"` — **skipped** when `<db_user>` is
+   the shared `POSTGRES_USER`, or with `--keep-role`. A `DROP ROLE` that fails
+   (role still owns objects in another database) is reported, not fatal.
+
+No restart.
+
 ## `bdus logs <instance> [args…]`
 
 `cd <instance> && docker compose logs "$@"`. e.g. `bdus logs prod -f --tail=200`.

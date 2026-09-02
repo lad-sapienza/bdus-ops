@@ -30,6 +30,7 @@ Applications
   app list   [inst|all]
   app export <instance> <app> [--out FILE]      one portable archive (tree + pg_dump)
   app import <instance> <archive> [--force] [--new-jwt]   the reverse, incl. into another instance
+  app delete <instance> <app> [--yes] [--no-backup] [--keep-role]   exports first, then removes
 
 Diagnostics
   doctor                  check the deploy invariants (.env perms, override, firewall rules,
