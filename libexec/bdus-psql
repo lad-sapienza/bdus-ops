@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # bdus psql <instance> [dbname]   — psql shell into the instance's Postgres
-#   default db: postgres.  App databases are named bdus_<app>.
+#   default db: postgres.  App databases are named <app> (no prefix).
 set -euo pipefail
 . "$BDUS_OPS_DIR/lib/common.sh"
 i="${1:?usage: bdus psql <instance> [dbname]}"
