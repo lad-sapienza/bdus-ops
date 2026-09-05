@@ -20,17 +20,24 @@ Instances
   logs <instance> [...]   docker compose logs, passthrough
 
 Data
-  backup [inst|all]       sqlite instance → projects_data tar; pg instance → pg_dumpall + tar.
-                          Prunes to BACKUP_RETENTION, rsyncs off-box if BACKUP_RSYNC_TARGET set.
+  backup [inst|all]       data/projects tar; pg instance also pg_dumpall; martin instance also
+                          gis-data tar. Prunes to BACKUP_RETENTION, rsyncs off-box if set.
   restore <instance> [--db FILE] [--files FILE] [--yes]
                           stop api → restore (latest by default) → start api
 
 Applications
   app add    <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X]
+                          [--gis] [--gis-write]   (pgsql: provision PostGIS/Martin/QGIS roles too)
+  app gis    <instance> <app> [--write]   add/retrofit PostGIS + Martin/QGIS roles on an existing app
   app list   [inst|all]
   app export <instance> <app> [--out FILE]      one portable archive (tree + pg_dump)
   app import <instance> <archive> [--force] [--new-jwt]   the reverse, incl. into another instance
   app delete <instance> <app> [--yes] [--no-backup] [--keep-role]   exports first, then removes
+
+Vector tiles (optional, per instance)
+  INSTANCE_<n>_MARTIN=1 in config.env (+ _MARTIN_PORT) adds a Martin service for
+  serving tiles from geodata kept outside BraDypUS (e.g. QGIS) — see `app gis` above
+  to attach an app to it, and DEPLOY-RUNBOOK.md §18 for the rest.
 
 Diagnostics
   doctor                  check the deploy invariants (.env perms, override, firewall rules,

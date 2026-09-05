@@ -684,32 +684,16 @@ bdus init prod        # SENZA --force: aggiunge solo MARTIN_PORT a .env, passwor
 
 Questo: passa l'immagine Postgres a PostGIS-enabled, aggiunge il container `martin` (porta pubblicata, filtrata dalla stessa `bdus-fw`/allowlist di `BDUS_PORT` — Martin non ha auth propria), crea `gis-data/` (bind mount, stili/sprite/font) e `martin-config.yaml` con un placeholder permanente (una funzione no-op nel DB `postgres` di servizio) che tiene Martin vivo anche a zero app agganciate — Martin si rifiuta di partire con zero sorgenti configurate, per questo il placeholder non va mai tolto.
 
-**Agganciare un'app** (`siti_scavo` nell'esempio — tutto manuale, nessuna automazione bdus-ops, stessa filosofia già usata per l'accesso QGIS read-only a Postgres):
+**Agganciare un'app** (`siti_scavo` nell'esempio) — gestito, non più manuale:
 
 ```bash
-bdus psql prod siti_scavo <<'SQL'
-CREATE SCHEMA gis;
-
--- QGIS: legge E scrive lo schema gis (mai public)
-CREATE ROLE siti_scavo_gis LOGIN PASSWORD 'scegli-una-password';
-GRANT USAGE, CREATE ON SCHEMA gis TO siti_scavo_gis;
-GRANT ALL ON ALL TABLES IN SCHEMA gis TO siti_scavo_gis;
-ALTER DEFAULT PRIVILEGES IN SCHEMA gis GRANT ALL ON TABLES TO siti_scavo_gis;
-
--- Martin: sola lettura su gis
-CREATE ROLE siti_scavo_martin LOGIN PASSWORD 'altra-password';
-GRANT USAGE ON SCHEMA gis TO siti_scavo_martin;
-GRANT SELECT ON ALL TABLES IN SCHEMA gis TO siti_scavo_martin;
-ALTER DEFAULT PRIVILEGES IN SCHEMA gis GRANT SELECT ON TABLES TO siti_scavo_martin;
-
--- BraDypUS stesso: sola lettura su gis, per join/view con le proprie tabelle in public
-GRANT USAGE ON SCHEMA gis TO siti_scavo;
-GRANT SELECT ON ALL TABLES IN SCHEMA gis TO siti_scavo;
-ALTER DEFAULT PRIVILEGES IN SCHEMA gis GRANT SELECT ON TABLES TO siti_scavo;
-SQL
+bdus app gis prod siti_scavo --write
+# senza --write: solo il ruolo di sola lettura per Martin (niente accesso QGIS)
 ```
 
-Poi in `/srv/bradypus/prod/martin-config.yaml`, sotto il placeholder, un'altra voce `postgres:` con solo il ruolo `_martin`:
+Crea/allinea (idempotente — rieseguibile, es. per aggiungere `--write` in un secondo momento senza toccare il ruolo già creato): `CREATE EXTENSION postgis` + `CREATE SCHEMA gis` sul database dell'app, il ruolo `siti_scavo_martin` (sola lettura su `gis`, mai su `public`), col `--write` anche `siti_scavo_gis` (lettura/scrittura su `gis`, per QGIS), e concede allo stesso ruolo dell'app (`siti_scavo`) lettura su `gis` per join/view con le proprie tabelle. Le password (generate, forti) finiscono in `projects/siti_scavo/gis-config.json` (chmod 600) e vengono stampate una volta — vanno lì anche se serve recuperarle più avanti. Se l'app viene esportata/importata o cancellata (`bdus app export/import/delete`), questi ruoli seguono l'app automaticamente.
+
+Poi in `/srv/bradypus/prod/martin-config.yaml`, sotto il placeholder, un'altra voce `postgres:` con solo il ruolo `_martin` (questo passo resta manuale — il file è tenuto a mano):
 
 ```yaml
   - connection_string: postgres://siti_scavo_martin:altra-password@postgres:5432/siti_scavo

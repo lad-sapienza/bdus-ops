@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# bdus app add    <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--db-user R] [--password-stdin]
+# bdus app add    <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--db-user R] [--password-stdin] [--gis] [--gis-write]
+# bdus app gis    <instance> <app> [--write]
 # bdus app list   [instance|all]
 # bdus app export <instance> <app> [--out FILE]
 # bdus app import <instance> <archive> [--force] [--new-jwt]
@@ -7,19 +8,35 @@
 #
 # add    — wraps vendor/add-app.sh → bin/create-app.php in the api container.
 #          Requires the api image >= 5.4.6 (>= 5.4.8 for the isolated pgsql role).
+#          --gis / --gis-write: see `gis` below (--gis-write implies --gis).
+# gis    — provisions PostGIS + a "gis" schema on a pgsql app's own database,
+#          plus a read-only role for Martin ("<app>_martin") and, with --write,
+#          a read-write role for QGIS ("<app>_gis", schema-scoped, never the
+#          app's own tables). Idempotent and incremental: re-running only adds
+#          what's missing (e.g. add --write later without touching the
+#          already-created read-only role or its password). Credentials are
+#          generated (openssl rand -hex 24) and stored in
+#          projects/<app>/gis-config.json (chmod 600) — printed once here too.
+#          This only provisions the role; wiring it into martin-config.yaml so
+#          Martin actually serves tiles is still a manual edit (DEPLOY-RUNBOOK.md
+#          §18) — not automated, since it's a hand-maintained file.
 # export — one portable archive of a single app: projects/<app>/ tree + (pgsql)
 #          a pg_dump of its database + a manifest. Lands in <instance>/exports/.
+#          gis-config.json (if any) travels for free — it lives inside
+#          projects/<app>/, which is tarred wholesale.
 # import — the reverse: extracts the tree, and for pgsql recreates the role and
-#          database from the credentials in the app's own config.json, then
-#          pg_restores. No container restart. Works into a different instance.
+#          database from the credentials in the app's own config.json (and any
+#          gis/martin roles from gis-config.json) before pg_restore, then loads
+#          the dump. No container restart. Works into a different instance.
 # delete — rm -rf projects/<app> and, for pgsql, DROP DATABASE WITH (FORCE) +
-#          DROP ROLE (unless it is the shared POSTGRES_USER, or --keep-role).
+#          DROP ROLE (unless it is the shared POSTGRES_USER, or --keep-role) +
+#          any gis/martin roles from gis-config.json.
 #          Exports a safety copy first (skip with --no-backup); asks you to type
 #          the app name (skip with --yes).
 set -euo pipefail
 . "$BDUS_OPS_DIR/lib/common.sh"
 
-action="${1:?usage: bdus app add|list|export|import|delete ...}"; shift || true
+action="${1:?usage: bdus app add|gis|list|export|import|delete ...}"; shift || true
 
 # read four config.json fields of an app inside an instance's api container:
 # engine, db_name, db_username, db_password  (one per line, may be empty)
@@ -32,14 +49,148 @@ app_cfg() {   # app_cfg <instance> <app>
   ' 2>/dev/null
 }
 
+# read four gis-config.json fields (may not exist yet): martin_user,
+# martin_password, gis_user, gis_password — one per line, may be empty
+gis_cfg() {   # gis_cfg <instance> <app>
+  dc "$1" exec -T -e A="$2" api php -r '
+    $f = "projects/".getenv("A")."/gis-config.json";
+    $c = is_file($f) ? json_decode(file_get_contents($f), true) : null;
+    if (!is_array($c)) $c = [];
+    echo ($c["martin_user"]??"")."\n".($c["martin_password"]??"")."\n".($c["gis_user"]??"")."\n".($c["gis_password"]??"")."\n";
+  ' 2>/dev/null
+}
+
+# merge non-empty fields into projects/<app>/gis-config.json (creates it if
+# missing), chmod 600. Pass "" for fields you don't want to touch.
+gis_cfg_set() {   # gis_cfg_set <instance> <app> <martin_user> <martin_password> <gis_user> <gis_password>
+  dc "$1" exec -T -e A="$2" -e MU="${3:-}" -e MP="${4:-}" -e GU="${5:-}" -e GP="${6:-}" api php -r '
+    $f = "projects/".getenv("A")."/gis-config.json";
+    $c = is_file($f) ? json_decode(file_get_contents($f), true) : [];
+    if (!is_array($c)) $c = [];
+    foreach (["martin_user"=>"MU","martin_password"=>"MP","gis_user"=>"GU","gis_password"=>"GP"] as $k=>$e) {
+      $v = getenv($e);
+      if ($v !== false && $v !== "") $c[$k] = $v;
+    }
+    file_put_contents($f, json_encode($c, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)."\n");
+    chmod($f, 0600);
+  '
+}
+
 valid_app_name() { case "$1" in ''|*[!a-z0-9_]*) return 1 ;; *) return 0 ;; esac; }
+
+# Idempotent: CREATE EXTENSION/SCHEMA if missing, then a read-only "<app>_martin"
+# role if missing, and — when want_write=1 — a read-write "<app>_gis" role if
+# missing. Safe to call repeatedly (e.g. add --write later).
+gis_enable() {   # gis_enable <instance> <app> <want_write:0|1>
+  local inst="$1" app="$2" want_write="$3"
+  local eng dbname dbuser _p
+  { read -r eng; read -r dbname; read -r dbuser; read -r _p; } < <(app_cfg "$inst" "$app") || true
+  [ -n "$eng" ] || die "app '$app' not found on '$inst' (is it running?)"
+  [ "$eng" = pgsql ] || die "'$app' is a sqlite app — GIS/Martin needs the pgsql engine"
+
+  local su; su="$(env_get "$inst" POSTGRES_USER)"
+  dc "$inst" exec -T postgres psql -U "$su" -d "$dbname" -v ON_ERROR_STOP=1 -q \
+    -c "CREATE EXTENSION IF NOT EXISTS postgis" \
+    -c "CREATE SCHEMA IF NOT EXISTS gis"
+  ok "  extension postgis + schema gis ready in '$dbname'"
+
+  local martin_user gis_user _mp _gp
+  { read -r martin_user; read -r _mp; read -r gis_user; read -r _gp; } < <(gis_cfg "$inst" "$app") || true
+
+  if [ -z "$martin_user" ]; then
+    martin_user="${app}_martin"
+    local pw; pw="$(gen_pw)"
+    printf 'CREATE ROLE "%s" LOGIN PASSWORD %s;\n' "$martin_user" "'$pw'" \
+      | dc "$inst" exec -T postgres psql -U "$su" -d postgres -v ON_ERROR_STOP=1 -q
+    dc "$inst" exec -T postgres psql -U "$su" -d postgres -v ON_ERROR_STOP=1 -q \
+      -c "GRANT CONNECT ON DATABASE \"$dbname\" TO \"$martin_user\""
+    gis_cfg_set "$inst" "$app" "$martin_user" "$pw" "" ""
+    ok "  role '$martin_user' created (read-only on schema gis)"
+    info "    password: $pw   (also in projects/$app/gis-config.json)"
+  else
+    info "  role '$martin_user' already enabled — unchanged"
+  fi
+
+  # Re-issued every call, not just on first creation: grants on ALL TABLES/
+  # SEQUENCES only cover objects that exist right now, so this is what catches
+  # up "$dbuser" and "$martin_user" on anything created since the last run —
+  # sequences matter too (an autoincrement "id" column is a table PLUS a
+  # sequence; GRANT ... ON ALL TABLES never implies sequence access, and a
+  # role can SELECT a table yet still need nothing from its sequence, but the
+  # writer role below does). Default privileges (below) are what keeps
+  # *future* objects covered automatically — but a default privilege only
+  # applies to objects the SAME creating role makes (PostgreSQL scopes ALTER
+  # DEFAULT PRIVILEGES per role), so it's set FOR ROLE "$su" here (whoever
+  # runs `bdus psql` by hand) and FOR ROLE "$gis_user" below once that role
+  # exists (the expected real table creator, via QGIS).
+  dc "$inst" exec -T postgres psql -U "$su" -d "$dbname" -v ON_ERROR_STOP=1 -q \
+    -c "GRANT USAGE ON SCHEMA gis TO \"$dbuser\", \"$martin_user\"" \
+    -c "GRANT SELECT ON ALL TABLES IN SCHEMA gis TO \"$dbuser\", \"$martin_user\"" \
+    -c "GRANT SELECT ON ALL SEQUENCES IN SCHEMA gis TO \"$dbuser\", \"$martin_user\"" \
+    -c "ALTER DEFAULT PRIVILEGES FOR ROLE \"$su\" IN SCHEMA gis GRANT SELECT ON TABLES TO \"$dbuser\", \"$martin_user\"" \
+    -c "ALTER DEFAULT PRIVILEGES FOR ROLE \"$su\" IN SCHEMA gis GRANT SELECT ON SEQUENCES TO \"$dbuser\", \"$martin_user\""
+
+  if [ "$want_write" -eq 1 ]; then
+    if [ -z "$gis_user" ]; then
+      gis_user="${app}_gis"
+      local pw2; pw2="$(gen_pw)"
+      printf 'CREATE ROLE "%s" LOGIN PASSWORD %s;\n' "$gis_user" "'$pw2'" \
+        | dc "$inst" exec -T postgres psql -U "$su" -d postgres -v ON_ERROR_STOP=1 -q
+      dc "$inst" exec -T postgres psql -U "$su" -d postgres -v ON_ERROR_STOP=1 -q \
+        -c "GRANT CONNECT ON DATABASE \"$dbname\" TO \"$gis_user\""
+      dc "$inst" exec -T postgres psql -U "$su" -d "$dbname" -v ON_ERROR_STOP=1 -q \
+        -c "GRANT USAGE, CREATE ON SCHEMA gis TO \"$gis_user\"" \
+        -c "ALTER DEFAULT PRIVILEGES FOR ROLE \"$gis_user\" IN SCHEMA gis GRANT SELECT ON TABLES TO \"$dbuser\", \"$martin_user\"" \
+        -c "ALTER DEFAULT PRIVILEGES FOR ROLE \"$gis_user\" IN SCHEMA gis GRANT SELECT ON SEQUENCES TO \"$dbuser\", \"$martin_user\""
+      gis_cfg_set "$inst" "$app" "" "" "$gis_user" "$pw2"
+      ok "  role '$gis_user' created (read-write on schema gis — for QGIS)"
+      info "    password: $pw2   (also in projects/$app/gis-config.json)"
+    else
+      info "  role '$gis_user' already enabled — unchanged"
+    fi
+    # catch-up for tables/sequences gis_user doesn't already own (e.g.
+    # created by "$su" or restored by `bdus app import` under "$dbuser"'s
+    # ownership) — same reasoning as the martin/dbuser catch-up above
+    dc "$inst" exec -T postgres psql -U "$su" -d "$dbname" -v ON_ERROR_STOP=1 -q \
+      -c "GRANT ALL ON ALL TABLES IN SCHEMA gis TO \"$gis_user\"" \
+      -c "GRANT ALL ON ALL SEQUENCES IN SCHEMA gis TO \"$gis_user\""
+  fi
+
+  info "  to actually serve tiles, add a postgres: entry to martin-config.yaml — DEPLOY-RUNBOOK.md §18"
+}
 
 case "$action" in
 
   add)
     inst="${1:?bdus app add <instance> --name ... --engine ... --email ...}"; shift
     instance_known "$inst" || die "unknown instance '$inst'"
-    exec "$BDUS_OPS_DIR/vendor/add-app.sh" "$(instance_dir "$inst")" "$@"
+    gis=0 giswrite=0 name=""
+    fwd_args=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --gis)       gis=1; shift ;;
+        --gis-write) gis=1; giswrite=1; shift ;;
+        --name)      name="${2:-}"; fwd_args+=("$1" "${2:-}"); shift 2 ;;
+        *)           fwd_args+=("$1"); shift ;;
+      esac
+    done
+    "$BDUS_OPS_DIR/vendor/add-app.sh" "$(instance_dir "$inst")" "${fwd_args[@]}"
+    if [ "$gis" -eq 1 ]; then
+      [ -n "$name" ] || die "internal error: --name not captured for --gis"
+      gis_enable "$inst" "$name" "$giswrite"
+    fi
+    ;;
+
+  gis)
+    inst="${1:?bdus app gis <instance> <app> [--write]}"; app="${2:?missing <app>}"; shift 2 || true
+    write=0
+    while [ $# -gt 0 ]; do case "$1" in
+      --write) write=1; shift ;;
+      *) die "unknown option: $1" ;;
+    esac; done
+    instance_known "$inst" || die "unknown instance '$inst'"
+    valid_app_name "$app" || die "bad app name '$app'"
+    gis_enable "$inst" "$app" "$write"
     ;;
 
   list)
@@ -125,12 +276,20 @@ case "$action" in
     if dc "$inst" exec -T api test -d "projects/$app" 2>/dev/null; then
       [ "$force" -eq 1 ] || die "app '$app' already exists on '$inst' — pass --force to replace it"
       warn "replacing existing '$app' on '$inst'"
-      dc "$inst" exec -T -e A="$app" api sh -c 'rm -rf "projects/$A"'
+      # read the OLD config before removing the tree that holds it (config.json
+      # / gis-config.json), otherwise there's nothing left to know what to drop
       if [ "$eng" = pgsql ]; then
         su="$(env_get "$inst" POSTGRES_USER)"
         { read -r _e; read -r odb; read -r ousr; read -r _p; } < <(app_cfg "$inst" "$app") || true
+        { read -r omu; read -r _omp; read -r ogu; read -r _ogp; } < <(gis_cfg "$inst" "$app") || true
+      fi
+      dc "$inst" exec -T -e A="$app" api sh -c 'rm -rf "projects/$A"'
+      if [ "$eng" = pgsql ]; then
         [ -z "${odb:-}" ] || dc "$inst" exec -T postgres psql -U "$su" -d postgres -q \
-          -c "DROP DATABASE IF EXISTS \"$odb\"" -c "DROP ROLE IF EXISTS \"$ousr\"" || true
+          -c "DROP DATABASE IF EXISTS \"$odb\" WITH (FORCE)" -c "DROP ROLE IF EXISTS \"$ousr\"" || true
+        for r in "${omu:-}" "${ogu:-}"; do
+          [ -n "$r" ] && dc "$inst" exec -T postgres psql -U "$su" -d postgres -q -c "DROP ROLE IF EXISTS \"$r\"" || true
+        done
       fi
     fi
 
@@ -156,8 +315,62 @@ case "$action" in
           -c "GRANT  CONNECT ON DATABASE \"$dbname\" TO \"$dbuser\""
         ok "  database '$dbname' created (owner $dbuser)"
       fi
-      dc "$inst" exec -T postgres pg_restore -U "$su" -d "$dbname" --no-owner --role="$dbuser" < "$work/db.dump"
+
+      # gis/martin roles (if this app had them) — recreate with the SAME stored
+      # password before restoring, so the dump's own GRANT statements (pg_dump
+      # captures ACLs) resolve against roles that already exist instead of
+      # erroring/skipping.
+      { read -r mu; read -r mp; read -r gu; read -r gp; } < <(gis_cfg "$inst" "$app") || true
+      for pair in "$mu:$mp" "$gu:$gp"; do
+        ru="${pair%%:*}"; rp="${pair#*:}"
+        [ -n "$ru" ] || continue
+        if [ "$(dc "$inst" exec -T postgres psql -U "$su" -d postgres -tAqc "SELECT 1 FROM pg_roles WHERE rolname='$ru'" | tr -d '[:space:]')" != 1 ]; then
+          printf 'CREATE ROLE "%s" LOGIN PASSWORD %s;\n' "$ru" "'$rp'" \
+            | dc "$inst" exec -T postgres psql -U "$su" -d postgres -v ON_ERROR_STOP=1 -q
+          dc "$inst" exec -T postgres psql -U "$su" -d postgres -v ON_ERROR_STOP=1 -q \
+            -c "GRANT CONNECT ON DATABASE \"$dbname\" TO \"$ru\""
+          ok "  role '$ru' recreated (gis)"
+        fi
+      done
+
+      # pg_restore runs with --role="$dbuser" so tables end up owned by the
+      # app's own role, not the shared superuser — but that means the dump's
+      # own "CREATE EXTENSION postgis" and "ALTER DEFAULT PRIVILEGES FOR ROLE
+      # <other>" statements fail (both need superuser, and --role effectively
+      # downgrades the whole restore session to $dbuser). Extensions dodge
+      # this: pre-create postgis here AS the superuser so the dump's own
+      # "IF NOT EXISTS" version of the same statement is a privilege-free
+      # no-op — this alone unblocks every geometry-typed object (tables,
+      # data, constraints) that would otherwise cascade-fail. The default
+      # privilege statements still fail (harmless "errors ignored on
+      # restore" warnings from pg_restore) — gis_enable, called again right
+      # after, reapplies them as the superuser, which does have permission.
+      if [ -n "$mu" ]; then
+        dc "$inst" exec -T postgres psql -U "$su" -d "$dbname" -v ON_ERROR_STOP=1 -q \
+          -c "CREATE EXTENSION IF NOT EXISTS postgis"
+        # A PostGIS-enabled dump always throws a few more ignorable warnings on
+        # restore beyond the two ALTER DEFAULT PRIVILEGES above — the
+        # extension's own COMMENT and its spatial_ref_sys reference table are
+        # owned by whoever ran CREATE EXTENSION (the superuser here), so
+        # --role="$dbuser" can't touch them; spatial_ref_sys already has its
+        # standard contents from CREATE EXTENSION itself, so the skipped COPY
+        # loses nothing. This is a well-known, harmless pg_dump/PostGIS
+        # interaction — pg_restore exits non-zero purely because it counted
+        # ignored errors, not because the restore is actually broken, so
+        # don't let it abort the script here (a non-postgis app below still
+        # aborts on any pg_restore error, unchanged).
+        dc "$inst" exec -T postgres pg_restore -U "$su" -d "$dbname" --no-owner --role="$dbuser" < "$work/db.dump" \
+          || warn "  pg_restore reported ignorable postgis/permission warnings above (expected)"
+      else
+        dc "$inst" exec -T postgres pg_restore -U "$su" -d "$dbname" --no-owner --role="$dbuser" < "$work/db.dump"
+      fi
       ok "  database '$dbname' loaded"
+
+      if [ -n "$mu" ]; then
+        info "  reconciling gis grants/default-privileges"
+        gis_enable "$inst" "$app" "$( [ -n "$gu" ] && echo 1 || echo 0 )" >/dev/null
+        ok "  gis grants reconciled"
+      fi
     fi
 
     if [ "$newjwt" -eq 1 ]; then
@@ -184,6 +397,11 @@ case "$action" in
     [ -n "$eng" ] || die "app '$app' not found on '$inst'"
     su="$(env_get "$inst" POSTGRES_USER || true)"
 
+    martin_user="" gis_user=""
+    if [ "$eng" = pgsql ]; then
+      { read -r martin_user; read -r _mp; read -r gis_user; read -r _gp; } < <(gis_cfg "$inst" "$app") || true
+    fi
+
     say ""
     warn "DELETE $inst/$app ($eng) — irreversible"
     say "  rm -rf projects/$app"
@@ -194,6 +412,8 @@ case "$action" in
       else
         say "  (role \"$dbuser\" kept)"
       fi
+      [ -n "$martin_user" ] && say "  DROP ROLE \"$martin_user\""
+      [ -n "$gis_user" ]    && say "  DROP ROLE \"$gis_user\""
     fi
     say ""
 
@@ -223,11 +443,22 @@ case "$action" in
           warn "  could not drop role '$dbuser' (still owns objects elsewhere?) — drop it by hand"
         fi
       fi
+      for r in "$martin_user" "$gis_user"; do
+        [ -n "$r" ] || continue
+        if dc "$inst" exec -T postgres psql -U "$su" -d postgres -q -c "DROP ROLE IF EXISTS \"$r\""; then
+          ok "  role '$r' dropped"
+        else
+          warn "  could not drop role '$r' — drop it by hand"
+        fi
+      done
+      if [ -n "$martin_user" ] || [ -n "$gis_user" ]; then
+        warn "  remove '$app's entry (if any) from martin-config.yaml by hand — not automated"
+      fi
     fi
 
     ok "deleted '$app' from '$inst'"
     ;;
 
-  -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) die "unknown action '$action' (add|list|export|import|delete)" ;;
+  -h|--help) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown action '$action' (add|gis|list|export|import|delete)" ;;
 esac

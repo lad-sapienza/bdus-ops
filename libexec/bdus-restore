@@ -2,7 +2,7 @@
 # bdus restore <instance> [--db FILE] [--files FILE] [--yes]
 #
 # Stops the api container, restores, starts it again.
-#   --files FILE   projects_data tar.gz   (default: newest <project>-files-*.tar.gz)
+#   --files FILE   data/projects tar.gz   (default: newest <project>-files-*.tar.gz)
 #   --db FILE      pg_dumpall .sql.gz     (postgres instances only; default: newest)
 #   --yes          skip the confirmation prompt
 #
@@ -57,9 +57,9 @@ if [ "$has_pg" -eq 1 ]; then
   ok "postgres restored"
 fi
 
-info "restoring projects_data…"
+info "restoring data/projects…"
 dc "$inst" run --rm --no-deps -T --entrypoint /usr/local/bin/docker-restore.sh api < "$filesf"
-ok "projects_data restored"
+ok "data/projects restored"
 
 dc "$inst" start api
 if wait_health "$inst" 90; then ok "$inst healthy"; else warn "$inst did not pass health — check: bdus logs $inst"; fi

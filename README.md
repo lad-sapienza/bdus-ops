@@ -74,8 +74,11 @@ by the containers themselves on every boot, no manual `chown` needed.
 Set `INSTANCE_<n>_MARTIN=1` (+ `_MARTIN_PORT`) to add a
 [Martin](https://maplibre.org/martin/) service for serving vector tiles from
 geodata maintained *outside* BraDypUS (typically QGIS) but relevant to a
-project. Off by default; not every app needs it. See `docs/COMMANDS.md` →
-"Vector tiles (Martin)" and `DEPLOY-RUNBOOK.md` §18 for attaching an app.
+project. Off by default; not every app needs it. Attaching an app is managed,
+not hand-typed SQL: `bdus app add ... --gis [--gis-write]` (or `bdus app gis
+<instance> <app> [--write]` on an existing app) provisions PostGIS + a
+least-privilege role for Martin and, with `--write`, one for QGIS. See
+`docs/COMMANDS.md` → "`bdus app gis`" and `DEPLOY-RUNBOOK.md` §18.
 
 ## Requirements
 

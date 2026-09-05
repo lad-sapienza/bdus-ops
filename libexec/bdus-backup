@@ -28,12 +28,12 @@ while read -r i; do
   ts="$(date +%Y%m%d-%H%M%S)"
   info "backup $i ($proj)"
 
-  # 1 — projects_data (config, .jwt_secret, uploaded files, sqlite DBs)
+  # 1 — data/projects (config, .jwt_secret, uploaded files, sqlite DBs)
   ftar="$dest/${proj}-files-${ts}.tar.gz"
   if dc "$i" exec -T api /usr/local/bin/docker-backup.sh > "$ftar.part" 2>/dev/null; then
     mv "$ftar.part" "$ftar"; ok "  $(basename "$ftar")  ($(du -h "$ftar" | cut -f1))"
   else
-    rm -f "$ftar.part"; bad "  projects_data backup failed (is '$i' up?)"; rc=1; continue
+    rm -f "$ftar.part"; bad "  data/projects backup failed (is '$i' up?)"; rc=1; continue
   fi
 
   # 2 — every Postgres database + roles

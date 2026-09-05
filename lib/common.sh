@@ -134,3 +134,6 @@ image_tag_exists() {   # image_tag_exists <image> <tag>
 }
 
 valid_semver() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+
+# ── secrets ─────────────────────────────────────────────────────────────────
+gen_pw() { openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'; }

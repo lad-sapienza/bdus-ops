@@ -88,7 +88,7 @@ if [ -f "$d/.env" ] && [ "$force" -ne 1 ]; then
 else
   pgpass=""
   if [ "$pg" = 1 ]; then
-    pgpass="$(openssl rand -hex 24 2>/dev/null || head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    pgpass="$(gen_pw)"
   fi
   umask 077
   {

@@ -151,7 +151,7 @@ volume) — untar the `-gis-` backup over it by hand if needed.
 For a full disaster-recovery restore into a fresh Postgres, `bdus init` the
 instance first, then `bdus restore`.
 
-## `bdus app add <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--db-user R] [--password-stdin]`
+## `bdus app add <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--db-user R] [--password-stdin] [--gis] [--gis-write]`
 
 Wraps `vendor/add-app.sh` → `bin/create-app.php` inside the `api` container: no
 HTTP, no `BRADYPUS_ALLOW_NEW_APP` toggle, no restart, no window. Admin password:
@@ -173,6 +173,42 @@ overrides the database name (default `<slug>`, no prefix); `--db-user
 if the app, role, or database already exists. The superuser never reaches the
 app — it is used only here and by `bdus backup` (`pg_dumpall` includes roles).
 
+`--gis` / `--gis-write` (pgsql only): after creation, also runs the `gis`
+subcommand below (`--gis-write` implies `--gis`) — see there for exactly what
+it provisions. Skip both if the app has no use for vector tiles or external
+GIS editing; add them later with `bdus app gis` if it turns out it does.
+
+## `bdus app gis <instance> <app> [--write]`
+
+Provisions PostGIS support for an existing pgsql app — the retrofit path for
+an app created without `--gis`/`--gis-write`, and also what those flags call
+internally at creation time. Idempotent and incremental: safe to re-run, and
+running it again later with `--write` only adds what's missing without
+touching (or rotating the password of) a role created by an earlier call.
+
+- `CREATE EXTENSION IF NOT EXISTS postgis` and `CREATE SCHEMA IF NOT EXISTS gis`
+  on the app's own database.
+- A read-only role, `<app>_martin` (`GRANT USAGE` on the schema, `SELECT` on
+  its tables/sequences, plus default privileges so *future* tables the
+  read-write role below creates are automatically covered too) — intended for
+  a `martin-config.yaml` `postgres:` entry (see "Vector tiles (Martin)"
+  above), never the shared superuser.
+- The app's own role also gets the same read-only access, for joins/views
+  between its own tables (`public`) and `gis`.
+- With `--write`: a read-write role, `<app>_gis` (`USAGE, CREATE` on the
+  schema, `ALL` on its tables/sequences) — for QGIS or similar remote-editing
+  clients. Scoped to `gis` only; it can never see or touch the app's own
+  tables.
+- Credentials are generated (`openssl rand -hex 24`) and stored in
+  `projects/<app>/gis-config.json` (chmod 600) — printed once here too, same
+  posture as the app's own DB password in `config.json`. Living inside
+  `projects/<app>/` means it travels for free with `app export`/`import`
+  (below), since that directory is already tarred wholesale.
+
+This only provisions the *role* — actually serving tiles still needs a manual
+`postgres:` entry in `martin-config.yaml` (`DEPLOY-RUNBOOK.md` §18), since
+that file stays hand-maintained by design.
+
 ## `bdus app list [instance|all]`
 
 Lists `projects/*` in each instance with engine and (pgsql) database name, read
@@ -184,11 +220,12 @@ Bundles a single app into one portable archive (`<app>-<instance>-<ts>.bdusapp.t
 in `<instance>/exports/`, or `--out`):
 
 - `manifest` — `app`, `engine`, `db_name`, `db_user`, `source_instance`, `bdus_version`, `exported_at`
-- `files.tar.gz` — `projects/<app>/` from `data/projects/` (`config.json`, `.jwt_secret`, `files/`, and for sqlite `db/bdus.sqlite`), via `docker-backup.sh <app>`
-- `db.dump` — for pgsql, `pg_dump -Fc` of the app's database (data + users)
+- `files.tar.gz` — `projects/<app>/` from `data/projects/` (`config.json`, `.jwt_secret`, `files/`, `gis-config.json` if `bdus app gis` was ever run, and for sqlite `db/bdus.sqlite`), via `docker-backup.sh <app>`
+- `db.dump` — for pgsql, `pg_dump -Fc` of the app's database (data + users) — this already includes the `gis` schema and its data, since a `pg_dump` of a database covers every schema in it
 
-An app is self-contained, so the archive is everything. Hot export: `pg_dump` is
-a consistent snapshot; `files/` is captured as-is.
+An app is self-contained, so the archive is everything, GIS/Martin roles
+included. Hot export: `pg_dump` is a consistent snapshot; `files/` is captured
+as-is.
 
 ## `bdus app import <instance> <archive> [--force] [--new-jwt]`
 
@@ -199,14 +236,25 @@ should be ≥ the source):
    are left alone)
 2. for pgsql: reads `db_name` / `db_username` / `db_password` from the restored
    `config.json`, creates the role (`CREATE ROLE … LOGIN PASSWORD`, from that
-   cleartext) and database (`OWNER`, `REVOKE CONNECT FROM PUBLIC`) if missing,
-   then `pg_restore --no-owner --role=<user>`
+   cleartext) and database (`OWNER`, `REVOKE CONNECT FROM PUBLIC`) if missing;
+   if the restored tree has a `gis-config.json`, also recreates `<app>_martin`/
+   `<app>_gis` (same stored passwords) and pre-creates the PostGIS extension,
+   *before* restoring — the dump's own `CREATE ROLE`-dependent GRANTs and
+   geometry-typed objects need those to already exist. Then
+   `pg_restore --no-owner --role=<user>` (a PostGIS-enabled dump throws a
+   handful of expected, harmless warnings here — the extension's own comment
+   and `spatial_ref_sys` are owned by the restoring superuser, not `<user>`,
+   and pg_restore's exit code reflects that even though nothing is actually
+   missing). Finally re-runs `bdus app gis`'s own provisioning logic once
+   more to reconcile the schema grants and default-privileges pg_restore
+   couldn't set (same reason: those specific statements need the superuser).
 3. `--new-jwt` deletes `.jwt_secret` (regenerated on next login) — use when
    cloning to a different site
 4. no restart; BraDypUS serves `projects/<app>/` on the next request
 
-`--force` replaces an app that already exists on the target (drops its dir and,
-for pgsql, its database and role first). Every instance's Postgres is
+`--force` replaces an app that already exists on the target (drops its dir,
+database — `WITH (FORCE)`, terminating any live connections — and role first,
+plus any `<app>_martin`/`<app>_gis` roles). Every instance's Postgres is
 PostGIS-enabled by default now, so PostGIS-using apps import cleanly; any
 other, less common extension must still pre-exist on the target server.
 
@@ -221,6 +269,10 @@ Removes a single app. Irreversible.
    connections), then `DROP ROLE "<db_user>"` — **skipped** when `<db_user>` is
    the shared `POSTGRES_USER`, or with `--keep-role`. A `DROP ROLE` that fails
    (role still owns objects in another database) is reported, not fatal.
+5. if `bdus app gis` was ever run for this app: also `DROP ROLE` for
+   `<app>_martin`/`<app>_gis` (no `--keep-role` exemption — these are always
+   dedicated to this one app, never shared), and a reminder to remove the
+   app's entry from `martin-config.yaml` by hand if it had one.
 
 No restart.
 
