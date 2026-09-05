@@ -209,6 +209,48 @@ This only provisions the *role* — actually serving tiles still needs a manual
 `postgres:` entry in `martin-config.yaml` (`DEPLOY-RUNBOOK.md` §18), since
 that file stays hand-maintained by design.
 
+## `bdus app to-pgsql <instance> <app> [--yes]`
+
+Converts a live sqlite app to pgsql in place — same app name, same URL,
+same `config.json` path. Structure always comes from BraDypUS's own schema
+code (`bdus app add`'s native DDL), never from an auto-translated guess —
+only the *data* transfer is delegated to [pgloader](https://pgloader.io/)
+(official `dimitri/pgloader` image, run as an ephemeral container on the
+instance's own compose network).
+
+1. Exports a safety copy first (mandatory, no opt-out), then asks you to
+   type the app name to confirm — this changes a live app's engine in place.
+2. `projects/<app>` → `projects/<app>-sqlite` (rename, not copy) — this both
+   preserves the original as a rollback safety net and is what unblocks the
+   next step (`bdus app add` refuses if the directory already exists).
+3. A fresh pgsql app is created under the same name — correct native schema
+   (all 24 system tables, BraDypUS's own FK/index naming) and `config.json`,
+   with a disposable placeholder admin.
+4. `files/` and `geodata/` are restored from the renamed-aside copy.
+5. A **trimmed copy** of the sqlite database (never the original) has
+   `bdus_log`, `bdus_versions`, `bdus_queries`, and `bdus_migrations` dropped
+   — these are deliberately not migrated: the first two are pure audit trail,
+   `bdus_migrations` must reflect *this* schema build's state (not the
+   source app's history), and `bdus_queries` holds free-text saved SQL that
+   may use SQLite-only syntax, not reliably portable to Postgres.
+6. The four system tables `bdus app add` seeds with real rows —
+   `bdus_users`, `bdus_cfg_app`, `bdus_cfg_tables`, `bdus_cfg_fields` — are
+   truncated so the placeholder admin/seed doesn't collide with the real
+   data about to load.
+7. pgloader runs **twice**: once scoped to `bdus_*` tables with
+   `create no tables` (data only — verified live that this preserves the
+   *existing* FK constraint names exactly, e.g. `fl_file_fk`, rather than
+   inventing new ones), and once scoped to everything else (project tables,
+   which don't exist yet, so pgloader creates them from the trimmed sqlite
+   schema).
+
+`projects/<app>-sqlite/` is kept, not deleted — remove it by hand once
+you've verified the converted app. **After converting, log in as an admin
+once** — a freshly built native schema always shows a full pending-migrations
+list on first login (`POST /api/upgrade/minor` resolves it); this is normal
+bootstrap behavior for any new app, not specific to this command, but easy
+to mistake for something having gone wrong.
+
 ## `bdus app list [instance|all]`
 
 Lists `projects/*` in each instance with engine and (pgsql) database name, read

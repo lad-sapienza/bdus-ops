@@ -29,6 +29,7 @@ Applications
   app add    <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X]
                           [--gis] [--gis-write]   (pgsql: provision PostGIS/Martin/QGIS roles too)
   app gis    <instance> <app> [--write]   add/retrofit PostGIS + Martin/QGIS roles on an existing app
+  app to-pgsql <instance> <app> [--yes]   convert a live sqlite app to pgsql in place (pgloader)
   app list   [inst|all]
   app export <instance> <app> [--out FILE]      one portable archive (tree + pg_dump)
   app import <instance> <archive> [--force] [--new-jwt]   the reverse, incl. into another instance

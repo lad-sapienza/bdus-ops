@@ -52,6 +52,7 @@ bdus status
 | new release 5.4.8 | `bdus update all 5.4.8` |
 | restore prod (latest) | `bdus restore prod` |
 | add an app | `bdus app add prod --name X --engine pgsql --email …` |
+| convert sqlite app to pgsql | `bdus app to-pgsql prod X` |
 | list apps | `bdus app list` |
 | psql into prod | `bdus psql prod siti_scavo` |
 | check for drift | `bdus doctor` |
@@ -83,7 +84,9 @@ least-privilege role for Martin and, with `--write`, one for QGIS. See
 ## Requirements
 
 - Debian (bash 4+), Docker CE + `docker compose` v2, `curl`, `openssl`.
-- The app VM needs network access to `ghcr.io` to pull images.
+- The app VM needs network access to `ghcr.io` to pull images (and to Docker
+  Hub too, only if you ever run `bdus app to-pgsql` — it pulls
+  `dimitri/pgloader` on demand).
 
 ## Layout
 

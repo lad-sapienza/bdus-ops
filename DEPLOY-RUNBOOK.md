@@ -711,7 +711,24 @@ Gli stili MapLibre (esportabili da QGIS) vanno in `gis-data/siti_scavo/styles/` 
 
 > **Backup** — `bdus backup` include `gis-data` automaticamente (terzo archivio, `-gis-`) quando `MARTIN=1`; lo schema `gis` di ogni app è già dentro il `pg_dumpall` esistente, nessuna azione in più.
 
+## 19 · Convertire un'app da sqlite a pgsql  
+_Raro ESERCIZIO_
+
+Un'app che cresce oltre sqlite si converte sul posto (stesso nome, stesso URL) con:
+
+```bash
+bdus app to-pgsql prod siti_scavo
+```
+
+Fa un export di sicurezza da solo (obbligatorio, non disattivabile — questa cambia l'engine di un'app viva), chiede di confermare digitando il nome, poi: rinomina `projects/siti_scavo` in `projects/siti_scavo-sqlite` (mai cancellata — resta come rete di sicurezza), crea un'app pgsql fresca con lo stesso nome (schema nativo BraDypUS, mai tradotto da pgloader), ripristina `files/`/`geodata/`, e infine usa **pgloader** (container effimero `dimitri/pgloader`, richiede accesso a Docker Hub oltre a `ghcr.io`) in due passate per il solo trasferimento dati: una per le tabelle di sistema (dentro lo schema già corretto), una per le tabelle di progetto (che pgloader crea da zero, non esistono ancora).
+
+**Non migrati, di proposito**: `bdus_log`, `bdus_versions`, `bdus_migrations` (deve riflettere lo stato di *questa* build dello schema, non la storia della sorgente) e `bdus_queries` (SQL salvato liberamente dall'utente — sintassi SQLite non detto sia valida su Postgres).
+
+> **Dopo la conversione, fai login come admin una volta** — uno schema nativo appena costruito mostra sempre la lista completa delle migrazioni in sospeso al primo login (si risolve da sola, `POST /api/upgrade/minor`) — è il comportamento normale per qualunque app nuova, non un segno che qualcosa sia andato storto.
+
+Verificato dal vivo: i nomi dei vincoli FK sulle tabelle di sistema restano esattamente quelli nativi di BraDypUS (es. `fl_file_fk`) — pgloader in modalità dati-soli li legge dal target invece di inventarne di nuovi.
+
 ---
 
-_BraDypUS v5.4.8 · runbook aggiornato il 2026-09-02, bind mount + Martin/PostGIS il 2026-09-05 · immagini ghcr.io/lad-sapienza/bdus-api · bdus-app_
+_BraDypUS v5.4.8 · runbook aggiornato il 2026-09-02, bind mount + Martin/PostGIS + conversione sqlite→pgsql il 2026-09-05 · immagini ghcr.io/lad-sapienza/bdus-api · bdus-app_
 

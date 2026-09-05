@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# bdus app add    <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--db-user R] [--password-stdin] [--gis] [--gis-write]
-# bdus app gis    <instance> <app> [--write]
-# bdus app list   [instance|all]
-# bdus app export <instance> <app> [--out FILE]
-# bdus app import <instance> <archive> [--force] [--new-jwt]
-# bdus app delete <instance> <app> [--yes] [--no-backup] [--keep-role]
+# bdus app add       <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--db-user R] [--password-stdin] [--gis] [--gis-write]
+# bdus app gis       <instance> <app> [--write]
+# bdus app to-pgsql  <instance> <app> [--yes]
+# bdus app list      [instance|all]
+# bdus app export    <instance> <app> [--out FILE]
+# bdus app import    <instance> <archive> [--force] [--new-jwt]
+# bdus app delete    <instance> <app> [--yes] [--no-backup] [--keep-role]
 #
 # add    — wraps vendor/add-app.sh → bin/create-app.php in the api container.
 #          Requires the api image >= 5.4.6 (>= 5.4.8 for the isolated pgsql role).
@@ -20,6 +21,16 @@
 #          This only provisions the role; wiring it into martin-config.yaml so
 #          Martin actually serves tiles is still a manual edit (DEPLOY-RUNBOOK.md
 #          §18) — not automated, since it's a hand-maintained file.
+# to-pgsql — converts a live sqlite app to pgsql in place (same name, same
+#          URL): renames projects/<app> aside, builds a fresh pgsql app under
+#          the same name for its native schema (bdus app add's own DDL —
+#          never pgloader's), then uses pgloader (ephemeral dimitri/pgloader
+#          container) in two passes: system tables get data-only ("create no
+#          tables"), project tables get created+loaded from scratch. Tables
+#          with only disposable content (bdus_log/versions/migrations, plus
+#          bdus_queries — saved SQL that may not be Postgres-portable) are
+#          excluded, not migrated. Exports a safety copy first, asks you to
+#          type the app name; the renamed sqlite copy is kept, not deleted.
 # export — one portable archive of a single app: projects/<app>/ tree + (pgsql)
 #          a pg_dump of its database + a manifest. Lands in <instance>/exports/.
 #          gis-config.json (if any) travels for free — it lives inside
@@ -36,7 +47,7 @@
 set -euo pipefail
 . "$BDUS_OPS_DIR/lib/common.sh"
 
-action="${1:?usage: bdus app add|gis|list|export|import|delete ...}"; shift || true
+action="${1:?usage: bdus app add|gis|to-pgsql|list|export|import|delete ...}"; shift || true
 
 # read four config.json fields of an app inside an instance's api container:
 # engine, db_name, db_username, db_password  (one per line, may be empty)
@@ -191,6 +202,130 @@ case "$action" in
     instance_known "$inst" || die "unknown instance '$inst'"
     valid_app_name "$app" || die "bad app name '$app'"
     gis_enable "$inst" "$app" "$write"
+    ;;
+
+  to-pgsql)
+    inst="${1:?bdus app to-pgsql <instance> <app> [--yes]}"; app="${2:?missing <app>}"; shift 2 || true
+    yes=0
+    while [ $# -gt 0 ]; do case "$1" in
+      --yes|-y) yes=1; shift ;;
+      *) die "unknown option: $1" ;;
+    esac; done
+    instance_known "$inst" || die "unknown instance '$inst'"
+    valid_app_name "$app" || die "bad app name '$app'"
+    instance_has_pg "$inst" || die "$inst has no Postgres service — enable INSTANCE_${inst}_POSTGRES=1 first"
+
+    { read -r eng; read -r _dn; read -r _du; read -r _dp; } < <(app_cfg "$inst" "$app") || true
+    [ -n "$eng" ] || die "app '$app' not found on '$inst'"
+    [ "$eng" = sqlite ] || die "'$app' is already '$eng', not sqlite — nothing to convert"
+
+    say ""
+    warn "CONVERT $inst/$app  sqlite → pgsql — structural change to a live app"
+    say "  projects/$app  →  projects/${app}-sqlite  (kept as rollback safety net, not deleted)"
+    say "  a fresh pgsql app is created under the same name (same URL, same config.json path)"
+    say "  migrated: bdus_users/cfg_app/cfg_tables/cfg_fields + every other system table with real"
+    say "  data (files, geodata, rs, userlinks, vocabularies, zotero, charts, ...) + all project tables"
+    say "  NOT migrated: bdus_log, bdus_versions, bdus_migrations (fresh state is correct for these),"
+    say "  bdus_queries (saved SQL may use SQLite-only syntax — not portable, flagged after the fact)"
+    say ""
+
+    info "safety export first…"
+    "$BDUS_OPS_DIR/libexec/bdus-app" export "$inst" "$app" || die "export failed — aborting"
+
+    if [ "$yes" -ne 1 ]; then
+      printf 'Type the app name "%s" to confirm: ' "$app" >&2
+      read -r ans </dev/tty 2>/dev/null || read -r ans || true
+      [ "$ans" = "$app" ] || { info "aborted"; exit 0; }
+    fi
+
+    d="$(instance_dir "$inst")"
+
+    # 1 — set the sqlite app aside (rename, not copy — this is also what
+    #     unblocks step 2, since add-app.sh refuses if projects/<app> exists)
+    dc "$inst" exec -T -e A="$app" api sh -c 'mv "projects/$A" "projects/${A}-sqlite"'
+    ok "  projects/$app → projects/${app}-sqlite"
+
+    # 2 — fresh pgsql app under the same name: native schema (all 24 system
+    #     tables, BraDypUS's own FK/index conventions) + correct config.json.
+    #     Throwaway admin — bdus_users gets truncated and reloaded with the
+    #     real list in step 5.
+    throwaway_pw="$(gen_pw)"
+    printf '%s' "$throwaway_pw" | "$BDUS_OPS_DIR/vendor/add-app.sh" "$d" \
+      --name "$app" --engine pgsql --email "to-pgsql-placeholder@migration.invalid" --password-stdin >/dev/null
+    ok "  fresh pgsql app '$app' created (native schema)"
+
+    # 3 — real files (add-app.sh created these dirs empty)
+    dc "$inst" exec -T -e A="$app" api sh -c '
+      cp -a "projects/${A}-sqlite/files/." "projects/$A/files/" 2>/dev/null || true
+      cp -a "projects/${A}-sqlite/geodata/." "projects/$A/geodata/" 2>/dev/null || true
+    '
+    ok "  files/ and geodata/ restored"
+
+    su="$(env_get "$inst" POSTGRES_USER)"
+    { read -r _e; read -r dbname; read -r dbuser; read -r dbpass; } < <(app_cfg "$inst" "$app")
+
+    # 4 — trimmed sqlite copy: drop the tables we deliberately don't migrate.
+    #     Lives inside data/projects (the bind mount) so both the host (for
+    #     the pgloader mount below) and the api container (to run the DROP
+    #     TABLEs) see the same file, at their own respective paths.
+    trimmed_container="projects/.to-pgsql-${app}.sqlite"
+    trimmed_host="$d/data/projects/.to-pgsql-${app}.sqlite"
+    cp "$d/data/projects/${app}-sqlite/db/bdus.sqlite" "$trimmed_host"
+    trap 'rm -f "$trimmed_host"; rm -rf "${work:-}"' EXIT
+    dc "$inst" exec -T -e T="$trimmed_container" api php -r '
+      $db = new PDO("sqlite:".getenv("T"));
+      foreach (["bdus_log","bdus_versions","bdus_queries","bdus_migrations"] as $t) {
+        $db->exec("DROP TABLE IF EXISTS \"$t\"");
+      }
+    '
+    ok "  trimmed sqlite copy ready (log/versions/queries/migrations excluded)"
+
+    # 5 — the 4 system tables `bdus app add` just seeded with real rows: empty
+    #     them before pgloader loads the real ones. CASCADE because
+    #     bdus_queries still physically exists (empty) with a FK to bdus_users.
+    dc "$inst" exec -T postgres psql -U "$dbuser" -d "$dbname" -v ON_ERROR_STOP=1 -q \
+      -c "TRUNCATE bdus_users, bdus_cfg_app, bdus_cfg_tables, bdus_cfg_fields CASCADE"
+    ok "  fresh-app seed rows cleared"
+
+    # 6 — pgloader, two passes, ephemeral container on the instance's own
+    #     compose network (plain `docker run`, not `docker compose run` —
+    #     pgloader isn't a declared service, same pattern already used
+    #     elsewhere in bdus-ops for one-off containers).
+    work="$(mktemp -d)"
+    target="postgresql://${dbuser}:${dbpass}@postgres:5432/${dbname}"
+    cat > "$work/pass-a.load" <<EOF
+load database
+     from sqlite:///data/app.sqlite
+     into ${target}
+ with include no drop, create no tables, truncate, reset sequences
+ including only table names like 'bdus%'
+;
+EOF
+    cat > "$work/pass-b.load" <<EOF
+load database
+     from sqlite:///data/app.sqlite
+     into ${target}
+ with include drop, create tables, create indexes, reset sequences
+ excluding table names like 'bdus%'
+;
+EOF
+    chmod 600 "$work"/*.load
+    net="$(instance_project "$inst")_bradypus-net"
+    info "pgloader pass 1/2 (system table data)…"
+    docker run --rm --network "$net" \
+      -v "$work:/scripts:ro" \
+      -v "$trimmed_host:/data/app.sqlite:ro" \
+      dimitri/pgloader pgloader /scripts/pass-a.load
+    info "pgloader pass 2/2 (project tables)…"
+    docker run --rm --network "$net" \
+      -v "$work:/scripts:ro" \
+      -v "$trimmed_host:/data/app.sqlite:ro" \
+      dimitri/pgloader pgloader /scripts/pass-b.load
+    ok "  data migrated"
+
+    ok "converted '$app' on '$inst' to pgsql"
+    warn "  bdus_queries (saved SQL) was NOT migrated — SQLite syntax may not be valid on Postgres; ask affected users to rewrite them"
+    info "  rollback safety net kept: projects/${app}-sqlite/ (remove by hand once verified)"
     ;;
 
   list)
@@ -459,6 +594,6 @@ case "$action" in
     ok "deleted '$app' from '$inst'"
     ;;
 
-  -h|--help) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) die "unknown action '$action' (add|gis|list|export|import|delete)" ;;
+  -h|--help) sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown action '$action' (add|gis|to-pgsql|list|export|import|delete)" ;;
 esac
