@@ -78,6 +78,13 @@ ok "data directories ready"
 # ── .env  (written once; holds the generated Postgres password) ─────────────
 if [ -f "$d/.env" ] && [ "$force" -ne 1 ]; then
   warn ".env exists — kept (use --force to overwrite; you would lose POSTGRES_PASSWORD)"
+  # Still append any newly-enabled flag's own var if it's missing — e.g.
+  # flipping MARTIN=1 on an instance that already has an .env needs
+  # MARTIN_PORT without regenerating (and rotating) everything else.
+  if [ "$martin" = 1 ] && ! grep -q '^MARTIN_PORT=' "$d/.env"; then
+    { echo; echo "# Martin (vector tiles) — published port, IP-allowlisted by bdus-fw (no auth of its own)"; echo "MARTIN_PORT=${martin_port}"; } >> "$d/.env"
+    ok "  MARTIN_PORT appended to existing .env"
+  fi
 else
   pgpass=""
   if [ "$pg" = 1 ]; then

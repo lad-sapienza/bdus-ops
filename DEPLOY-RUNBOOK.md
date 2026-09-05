@@ -652,10 +652,14 @@ docker run --rm \
   -v "$PWD/data/pgdata":/to \
   alpine sh -c 'cp -a /from/. /to/'
 
-bdus init prod --force     # rigenera bdus.override.yml sui bind mount; .env resta intatto
-bdus start prod
+bdus init prod             # SENZA --force: .env resta intatto (password Postgres invariata),
+                            # rigenera solo bdus.override.yml sui bind mount, pull, up
 bdus doctor                # verde su entrambe le nuove cartelle
 ```
+
+> **Attenzione — mai `--force` qui.** `--force` rigenera anche `.env`, compresa una **nuova** `POSTGRES_PASSWORD` casuale — il database dentro `data/pgdata` avrebbe ancora la vecchia password, quindi ogni connessione fallirebbe. Senza `--force`, `.env` resta intatto (kept) e solo `bdus.override.yml` viene riscritto — è tutto quello che serve.
+
+> **Nota** — questo passo porta anche l'immagine Postgres a PostGIS (`postgis/postgis:16-3.4-alpine`, stessa UID di `postgres:16-alpine`, nessun rischio di permessi) anche se non attivi Martin: è voluto, l'estensione si può creare o meno per database a costo pressoché nullo.
 
 Verifica prima di continuare: login su `paths`, apri un record, controlla che le geometrie/allegati ci siano. Solo a verifica fatta:
 
@@ -675,7 +679,7 @@ Serve tile vettoriali da dati geografici mantenuti **fuori** da BraDypUS (es. QG
 ```bash
 INSTANCE_prod_MARTIN=1
 INSTANCE_prod_MARTIN_PORT=192.168.4.39:8091   # come BDUS_PORT: IP privato, mai 0.0.0.0
-bdus init prod --force
+bdus init prod        # SENZA --force: aggiunge solo MARTIN_PORT a .env, password Postgres invariata
 ```
 
 Questo: passa l'immagine Postgres a PostGIS-enabled, aggiunge il container `martin` (porta pubblicata, filtrata dalla stessa `bdus-fw`/allowlist di `BDUS_PORT` — Martin non ha auth propria), crea `gis-data/` (bind mount, stili/sprite/font) e `martin-config.yaml` con un placeholder permanente (una funzione no-op nel DB `postgres` di servizio) che tiene Martin vivo anche a zero app agganciate — Martin si rifiuta di partire con zero sorgenti configurate, per questo il placeholder non va mai tolto.

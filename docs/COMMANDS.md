@@ -59,7 +59,13 @@ Creates `$BDUS_ROOT/<instance>/` from the `INSTANCE_<instance>_*` keys in
 
 `.env` is written **once**. Re-running refreshes `bradypus.yml` and
 `bdus.override.yml` but keeps `.env` (holds the generated password) unless
-`--force`.
+`--force` — **never use `--force` just to pick up a bind-mount/Martin change
+on an existing instance**, it rotates `POSTGRES_PASSWORD` while the database
+itself still has the old one. The one exception: flipping `MARTIN=1` on an
+instance that already has an `.env` appends `MARTIN_PORT` to it (only if
+missing) without touching anything else, so plain `bdus init <instance>`
+(no `--force`) is always the right call for enabling a new flag on an
+existing instance.
 
 ### Vector tiles (Martin)
 
