@@ -2,20 +2,39 @@
 # bdus init <instance> [--version X.Y.Z] [--force]
 #
 # Creates <BDUS_ROOT>/<instance>/ from config.env:
-#   bradypus.yml (fetched)  +  .env  +  bdus.override.yml
+#   bradypus.yml (fetched)  +  .env  +  bdus.override.yml  +  data/ (bind mounts)
+#   +  martin-config.yaml  +  gis-data/   (only when MARTIN=1)
 # then `docker compose pull && up -d` and waits for health.
 #
 # .env is written once. On re-run it is kept (it holds the generated Postgres
 # password) unless --force is given. Safe to re-run for the compose files.
+#
+# Storage is host bind mounts (data/projects, data/pgdata, gis-data), not
+# named Docker volumes: this is a single-operator, single-host deployment
+# with direct SSH access, so a plain directory is simpler to inspect and
+# back up than Docker's volume abstraction. bradypus.yml itself (what any
+# self-hoster downloads) is untouched and keeps named volumes as its
+# zero-setup default — this override just replaces those mounts for our
+# own instances.
 set -euo pipefail
 . "$BDUS_OPS_DIR/lib/common.sh"
+
+# Neither image needs its bind-mounted data directory pre-chowned: both
+# start their container as root and self-heal ownership on every boot —
+# postgis/postgres's docker-entrypoint.sh runs
+# `find "$PGDATA" ! -user postgres -exec chown postgres {} +` (verified by
+# reading it inside the image), same idea as bdus-api's own entrypoint doing
+# `chown -R www-data ... projects`. Martin's image has no USER directive
+# either (runs as root) so gis-data needs no ownership handling at all.
+POSTGRES_IMAGE=postgis/postgis:16-3.4-alpine
+MARTIN_IMAGE=ghcr.io/maplibre/martin:1.15.0
 
 inst=""; version="$BDUS_VERSION"; force=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) version="${2:?}"; shift 2 ;;
     --force)   force=1; shift ;;
-    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)        die "unknown option: $1" ;;
     *)         [ -z "$inst" ] || die "one instance at a time"; inst="$1"; shift ;;
   esac
@@ -28,12 +47,18 @@ pg="$(cfg_instance "$inst" POSTGRES)"
 allow="$(cfg_instance "$inst" ALLOW_NEW_APP)"
 mem_api="$(cfg_instance "$inst" MEM_API)"
 mem_front="$(cfg_instance "$inst" MEM_FRONT)"
+martin="$(cfg_instance "$inst" MARTIN)"
+martin_port="$(cfg_instance "$inst" MARTIN_PORT)"
 [ -n "$port" ]  || die "config.env: INSTANCE_${inst}_PORT is required"
-: "${pg:=0}"; : "${allow:=0}"; : "${mem_api:=1g}"; : "${mem_front:=192m}"
+: "${pg:=0}"; : "${allow:=0}"; : "${mem_api:=1g}"; : "${mem_front:=192m}"; : "${martin:=0}"
+if [ "$martin" = 1 ]; then
+  [ "$pg" = 1 ] || die "config.env: INSTANCE_${inst}_MARTIN=1 requires INSTANCE_${inst}_POSTGRES=1"
+  [ -n "$martin_port" ] || die "config.env: INSTANCE_${inst}_MARTIN=1 requires INSTANCE_${inst}_MARTIN_PORT"
+fi
 
 d="$(instance_dir "$inst")"
 proj="bdus-$inst"
-info "init $inst  →  $d   (port $port, postgres=$pg, allow_new_app=$allow, version $version)"
+info "init $inst  →  $d   (port $port, postgres=$pg, martin=$martin, allow_new_app=$allow, version $version)"
 
 mkdir -p "$d"
 chmod 750 "$d"
@@ -42,6 +67,13 @@ chmod 750 "$d"
 curl -fsSL -o "$d/bradypus.yml" \
   "https://raw.githubusercontent.com/lad-sapienza/BraDypUS/${GHCR_YAML_REF}/bradypus.yml"
 ok "bradypus.yml"
+
+# ── data/ (bind-mounted storage — created before first `up`; ownership is
+#    fixed up by each container's own entrypoint, see the note above) ───────
+mkdir -p "$d/data/projects"
+[ "$pg" = 1 ]     && mkdir -p "$d/data/pgdata"
+[ "$martin" = 1 ] && mkdir -p "$d/gis-data"
+ok "data directories ready"
 
 # ── .env  (written once; holds the generated Postgres password) ─────────────
 if [ -f "$d/.env" ] && [ "$force" -ne 1 ]; then
@@ -64,16 +96,64 @@ else
     echo "BRADYPUS_ALLOW_NEW_APP=${allow}"
     if [ "$pg" = 1 ]; then
       echo
-      echo "# PostgreSQL — shared server, one database per pgsql app"
+      echo "# PostgreSQL (PostGIS-enabled) — shared server, one database per pgsql app"
       echo "POSTGRES_USER=bdus"
       echo "POSTGRES_PASSWORD=${pgpass}"
       echo "POSTGRES_DB=postgres"
+    fi
+    if [ "$martin" = 1 ]; then
+      echo
+      echo "# Martin (vector tiles) — published port, IP-allowlisted by bdus-fw (no auth of its own)"
+      echo "MARTIN_PORT=${martin_port}"
     fi
   } > "$d/.env"
   umask 022
   chmod 600 "$d/.env"
   ok ".env written (chmod 600)"
   [ "$pg" = 1 ] && info "  POSTGRES_PASSWORD generated — it is in $d/.env only"
+fi
+
+# ── martin-config.yaml (scaffold once; per-app sources are added by hand,
+#    see DEPLOY-RUNBOOK.md "Martin / vector tiles") ──────────────────────────
+# Martin refuses to start at all with zero configured tile sources ("No tile
+# sources found", fatal — verified against a real run). The bootstrap
+# function below is a permanent, harmless placeholder (always returns a NULL
+# tile) created in the shared "postgres" maintenance DB so Martin has
+# something valid from the very first boot, before any app opts in. It's
+# referenced by explicit `functions:` entry (not auto_publish), so using the
+# shared superuser for just this one static, harmless function is fine —
+# unlike the per-app entries added later, which must use a scoped role.
+if [ "$martin" = 1 ] && [ ! -f "$d/martin-config.yaml" ]; then
+  cat > "$d/martin-config.yaml" <<'EOF'
+# generated by bdus init — Martin has no built-in auth; exposure is the
+# published port + the bdus-fw IP allowlist, not this file.
+#
+# The entry below is a permanent bootstrap placeholder (a no-op function in
+# the shared "postgres" maintenance DB, created by `bdus init`) — Martin
+# refuses to start with zero sources, so this keeps it running even before
+# any app opts in. Do not remove it.
+#
+# Add one more `postgres:` list entry per app that opts in to vector tiles,
+# scoped to that app's own least-privilege role (never the shared "bdus"
+# superuser):
+#
+# - connection_string: postgres://<app>_martin:<password>@postgres:5432/<app>
+#   auto_publish:
+#     from_schemas: [gis]
+#
+# styles.paths (add once an app has styles to serve):
+#   - /gis-data/<app>/styles
+#
+# Martin re-reads this file on its own (reload_interval, default 10 min) —
+# no restart needed after adding an app. See DEPLOY-RUNBOOK.md.
+postgres:
+  - connection_string: postgres://${POSTGRES_USER:-bdus}:${POSTGRES_PASSWORD}@postgres:5432/postgres
+    functions:
+      _bdus_bootstrap:
+        schema: public
+        function: bdus_martin_bootstrap
+EOF
+  ok "martin-config.yaml (bootstrap scaffold)"
 fi
 
 # ── bdus.override.yml ──────────────────────────────────────────────────────
@@ -88,6 +168,8 @@ services:
     security_opt:
       - no-new-privileges:true
     mem_limit: ${mem_api}
+    volumes:
+      - ./data/projects:/var/www/html/projects
 EOF
   if [ "$pg" = 1 ]; then
     cat <<EOF
@@ -105,13 +187,13 @@ EOF
   if [ "$pg" = 1 ]; then
     cat <<EOF
   postgres:
-    image: postgres:16-alpine
+    image: ${POSTGRES_IMAGE}
     environment:
       POSTGRES_USER: \${POSTGRES_USER:-bdus}
       POSTGRES_PASSWORD: \${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: \${POSTGRES_DB:-postgres}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ./data/pgdata:/var/lib/postgresql/data
     shm_size: 256mb
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \${POSTGRES_USER:-bdus} -d \${POSTGRES_DB:-postgres}"]
@@ -120,9 +202,32 @@ EOF
       retries: 12
     networks: [bradypus-net]
     restart: unless-stopped
-
-volumes:
-  pgdata:
+EOF
+  fi
+  if [ "$martin" = 1 ]; then
+    cat <<EOF
+  martin:
+    image: ${MARTIN_IMAGE}
+    command: ["--config", "/martin-config.yaml"]
+    environment:
+      POSTGRES_USER: \${POSTGRES_USER:-bdus}
+      POSTGRES_PASSWORD: \${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "\${MARTIN_PORT:?set MARTIN_PORT in .env}:3000"
+    volumes:
+      - ./martin-config.yaml:/martin-config.yaml:ro
+      - ./gis-data:/gis-data:ro
+    security_opt:
+      - no-new-privileges:true
+    networks: [bradypus-net]
+    restart: unless-stopped
+EOF
+  fi
+  if [ "$pg" = 1 ]; then
+    cat <<EOF
 
 networks:
   bradypus-net:
@@ -136,13 +241,30 @@ ok "bdus.override.yml"
 dc "$inst" config --quiet || die "compose config invalid"
 info "pulling images…"
 dc "$inst" pull -q
+
+if [ "$martin" = 1 ]; then
+  # postgres must be up (and the bootstrap function must exist) before martin
+  # ever starts, or its first boot crash-loops on "no tile sources found".
+  dc "$inst" up -d postgres
+  pguser="$(env_get "$inst" POSTGRES_USER || echo bdus)"
+  n=0
+  until dc "$inst" exec -T postgres pg_isready -U "$pguser" >/dev/null 2>&1; do
+    n=$((n + 2)); [ "$n" -lt 60 ] || die "postgres did not become ready"
+    sleep 2
+  done
+  dc "$inst" exec -T postgres psql -U "$pguser" -d postgres -v ON_ERROR_STOP=1 -c \
+    "CREATE OR REPLACE FUNCTION public.bdus_martin_bootstrap(z integer, x integer, y integer, query_params json) RETURNS bytea AS \$\$ SELECT NULL::bytea \$\$ LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE;" \
+    >/dev/null
+  ok "martin bootstrap function ready"
+fi
+
 dc "$inst" up -d
 ok "compose up"
 
 # refresh the container-port firewall (needs root; best-effort)
 if [ -x /usr/local/sbin/bdus-fw.sh ]; then
   if sudo -n true 2>/dev/null; then sudo systemctl restart bdus-fw 2>/dev/null || sudo /usr/local/sbin/bdus-fw.sh || true
-  else warn "run: sudo systemctl restart bdus-fw   (to open ${port##*:} to the proxy)"; fi
+  else warn "run: sudo systemctl restart bdus-fw   (to open published ports to the proxy)"; fi
 fi
 
 if wait_health "$inst" 90; then

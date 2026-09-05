@@ -63,14 +63,16 @@ cat > "$FW" <<EOF
 #!/bin/sh
 # Managed by bdus-ops (setup/host.sh). Restricts the ports published by the
 # BraDypUS instances to ALLOW_IPS only. Ports are discovered from each
-# <instance>/.env at runtime, so adding an instance needs only a restart.
+# <instance>/.env at runtime (any "*_PORT=<ip>:<port>" line — BDUS_PORT,
+# MARTIN_PORT, and any future one), so adding an instance or a new service
+# needs only a restart, never an edit here.
 set -eu
 ALLOW_IPS="${ALLOW}"
 ROOT="${ROOT}"
 
 iptables -nL DOCKER-USER >/dev/null 2>&1 || { iptables -N DOCKER-USER; iptables -I FORWARD -j DOCKER-USER; }
 
-ports=\$(sed -n 's/^BDUS_PORT=.*:\([0-9][0-9]*\)\$/\1/p' "\$ROOT"/*/.env 2>/dev/null | sort -u)
+ports=\$(sed -n 's/^[A-Z_]*_PORT=.*:\([0-9][0-9]*\)\$/\1/p' "\$ROOT"/*/.env 2>/dev/null | sort -u)
 [ -n "\$ports" ] || exit 0
 
 for p in \$ports; do

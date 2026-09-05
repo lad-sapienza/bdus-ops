@@ -628,7 +628,102 @@ Ferma `api` → ripristina → riavvia `api` → attende health. DR completo su 
 - `seed-demo.sh` (dataset dimostrativo) richiede il repo clonato e `BASE_URL` puntato a `http://192.168.4.39:8082`; funziona perché la demo ha `ALLOW_NEW_APP=1`.
 - Revoca sessioni di un utente: endpoint `revokeToken` lato app (incrementa `token_version`) — non serve toccare i container.
 
+## 17 · Migrazione a bind mount (una tantum, istanze esistenti)  
+_Una tantum ESERCIZIO_
+
+Da questa versione di bdus-ops, `bdus init` monta `data/projects` e (se pgsql) `data/pgdata` come **cartelle host** invece che come volumi Docker gestiti — stesso pattern che già usi per Directus, comodo perché ispezionabile/backuppabile direttamente da host, senza passare da `docker exec`. `bradypus.yml` non cambia: resta a volumi named per chi lo scarica da zero, è solo `bdus.override.yml` (generato da `bdus init`) che punta altrove. Nessun bug di permessi atteso: sia l'immagine Postgres/PostGIS sia quella `api` fanno il proprio `chown` sulla cartella montata ad ogni avvio (verificato leggendo i rispettivi `docker-entrypoint.sh`).
+
+`prod` oggi ha una sola app (**paths**), ancora in fase di test/verifica — il vecchio v4 resta la fonte di verità, quindi un imprevisto qui è recuperabile, non un disastro. Buon momento per farlo.
+
+```bash
+bdus stop prod      # ferma i container, il volume resta intatto
+
+cd /srv/bradypus/prod
+mkdir -p data/projects data/pgdata
+
+# copia il contenuto dei volumi named nelle nuove cartelle host
+docker run --rm \
+  -v bdus-prod_projects_data:/from \
+  -v "$PWD/data/projects":/to \
+  alpine sh -c 'cp -a /from/. /to/'
+
+docker run --rm \
+  -v bdus-prod_pgdata:/from \
+  -v "$PWD/data/pgdata":/to \
+  alpine sh -c 'cp -a /from/. /to/'
+
+bdus init prod --force     # rigenera bdus.override.yml sui bind mount; .env resta intatto
+bdus start prod
+bdus doctor                # verde su entrambe le nuove cartelle
+```
+
+Verifica prima di continuare: login su `paths`, apri un record, controlla che le geometrie/allegati ci siano. Solo a verifica fatta:
+
+```bash
+docker volume rm bdus-prod_projects_data bdus-prod_pgdata
+```
+
+(oppure lasciali qualche giorno come rete di sicurezza prima di rimuoverli). Ripeti per `demo` (niente `pgdata`, `POSTGRES=0`).
+
+## 18 · Martin / vector tiles (opzionale, per-app)  
+_Ricorrente ESERCIZIO_
+
+Serve tile vettoriali da dati geografici mantenuti **fuori** da BraDypUS (es. QGIS) ma pertinenti a un progetto — non è una feature dell'app, è un servizio di deploy in più, spento di default e attivabile per singola app. Non tutte le app ne hanno bisogno.
+
+**Attivazione a livello di istanza** (una volta sola, in `config.env`):
+
+```bash
+INSTANCE_prod_MARTIN=1
+INSTANCE_prod_MARTIN_PORT=192.168.4.39:8091   # come BDUS_PORT: IP privato, mai 0.0.0.0
+bdus init prod --force
+```
+
+Questo: passa l'immagine Postgres a PostGIS-enabled, aggiunge il container `martin` (porta pubblicata, filtrata dalla stessa `bdus-fw`/allowlist di `BDUS_PORT` — Martin non ha auth propria), crea `gis-data/` (bind mount, stili/sprite/font) e `martin-config.yaml` con un placeholder permanente (una funzione no-op nel DB `postgres` di servizio) che tiene Martin vivo anche a zero app agganciate — Martin si rifiuta di partire con zero sorgenti configurate, per questo il placeholder non va mai tolto.
+
+**Agganciare un'app** (`siti_scavo` nell'esempio — tutto manuale, nessuna automazione bdus-ops, stessa filosofia già usata per l'accesso QGIS read-only a Postgres):
+
+```bash
+bdus psql prod siti_scavo <<'SQL'
+CREATE SCHEMA gis;
+
+-- QGIS: legge E scrive lo schema gis (mai public)
+CREATE ROLE siti_scavo_gis LOGIN PASSWORD 'scegli-una-password';
+GRANT USAGE, CREATE ON SCHEMA gis TO siti_scavo_gis;
+GRANT ALL ON ALL TABLES IN SCHEMA gis TO siti_scavo_gis;
+ALTER DEFAULT PRIVILEGES IN SCHEMA gis GRANT ALL ON TABLES TO siti_scavo_gis;
+
+-- Martin: sola lettura su gis
+CREATE ROLE siti_scavo_martin LOGIN PASSWORD 'altra-password';
+GRANT USAGE ON SCHEMA gis TO siti_scavo_martin;
+GRANT SELECT ON ALL TABLES IN SCHEMA gis TO siti_scavo_martin;
+ALTER DEFAULT PRIVILEGES IN SCHEMA gis GRANT SELECT ON TABLES TO siti_scavo_martin;
+
+-- BraDypUS stesso: sola lettura su gis, per join/view con le proprie tabelle in public
+GRANT USAGE ON SCHEMA gis TO siti_scavo;
+GRANT SELECT ON ALL TABLES IN SCHEMA gis TO siti_scavo;
+ALTER DEFAULT PRIVILEGES IN SCHEMA gis GRANT SELECT ON TABLES TO siti_scavo;
+SQL
+```
+
+Poi in `/srv/bradypus/prod/martin-config.yaml`, sotto il placeholder, un'altra voce `postgres:` con solo il ruolo `_martin`:
+
+```yaml
+  - connection_string: postgres://siti_scavo_martin:altra-password@postgres:5432/siti_scavo
+    auto_publish:
+      from_schemas: [gis]
+```
+
+Martin rilegge da solo (`reload_interval`, 10 min di default) — niente restart; per non aspettare: `docker compose restart martin`. Verifica da un IP incluso in `PROXY_ALLOW_IPS`:
+
+```bash
+curl http://192.168.4.39:8091/catalog     # deve elencare solo le tabelle di gis, mai public
+```
+
+Gli stili MapLibre (esportabili da QGIS) vanno in `gis-data/siti_scavo/styles/` — un semplice `rsync`/`scp`, nessun comando bdus dedicato: è sempre l'amministratore di sistema a intervenire, via SSH sulla stessa VM.
+
+> **Backup** — `bdus backup` include `gis-data` automaticamente (terzo archivio, `-gis-`) quando `MARTIN=1`; lo schema `gis` di ogni app è già dentro il `pg_dumpall` esistente, nessuna azione in più.
+
 ---
 
-_BraDypUS v5.4.8 · runbook aggiornato il 2026-09-02 · immagini ghcr.io/lad-sapienza/bdus-api · bdus-app_
+_BraDypUS v5.4.8 · runbook aggiornato il 2026-09-02, bind mount + Martin/PostGIS il 2026-09-05 · immagini ghcr.io/lad-sapienza/bdus-api · bdus-app_
 

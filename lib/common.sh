@@ -98,9 +98,19 @@ instance_has_pg() {   # 0 if this instance runs Postgres
   printf '%s\n' "$svcs" | grep -qx postgres
 }
 
+instance_has_martin() {   # 0 if this instance runs Martin (vector tiles)
+  local flag; flag="$(cfg_instance "$1" MARTIN)"
+  [ "$flag" = 1 ] && return 0
+  [ "$flag" = 0 ] && return 1
+  local svcs=""
+  svcs="$( ( cd "$(instance_dir "$1")" 2>/dev/null && docker compose config --services ) 2>/dev/null )" || true
+  printf '%s\n' "$svcs" | grep -qx martin
+}
+
 instance_project() { env_get "$1" COMPOSE_PROJECT_NAME; }
 instance_version() { env_get "$1" BDUS_VERSION; }
 backup_dir()       { printf '%s/backups' "$(instance_dir "$1")"; }
+gis_data_dir()     { printf '%s/gis-data' "$(instance_dir "$1")"; }
 
 # ── health ──────────────────────────────────────────────────────────────────
 instance_health() {   # 0 if the published endpoint answers 2xx

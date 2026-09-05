@@ -30,8 +30,14 @@ for i in $INSTANCES; do
   chk  "  bdus.override.yml present"    "[ -f '$d/bdus.override.yml' ]"
   chk  "  compose config valid"        "dc '$i' config --quiet"
   chk  "  api container running"        "has_line \"dc '$i' ps --status running --format '{{.Service}}'\" '^api\$'"
+  chk  "  data/projects present"        "[ -d '$d/data/projects' ]"
   if instance_has_pg "$i"; then
     chk "  postgres healthy"            "dc '$i' exec -T postgres pg_isready -U \"\$(env_get '$i' POSTGRES_USER || echo bdus)\""
+    chk "  data/pgdata owned by uid 70" "[ \"\$(stat -c '%u' '$d/data/pgdata' 2>/dev/null)\" = 70 ]"
+  fi
+  if instance_has_martin "$i"; then
+    chk "  gis-data present"            "[ -d '$d/gis-data' ]"
+    chk "  martin healthy"              "dc '$i' exec -T martin wget -q -O /dev/null http://localhost:3000/health"
   fi
 done
 

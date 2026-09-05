@@ -25,27 +25,77 @@ Re-login after the first run (docker group).
 Creates `$BDUS_ROOT/<instance>/` from the `INSTANCE_<instance>_*` keys in
 `config.env`:
 
-- fetches `bradypus.yml` (ref `GHCR_YAML_REF`) — kept intact
+- fetches `bradypus.yml` (ref `GHCR_YAML_REF`) — kept intact; it still declares
+  named Docker volumes for anyone else deploying it as-is
+- creates `data/projects/` and, for a Postgres instance, `data/pgdata/` —
+  **host bind mounts**, not named volumes: this is a single-operator install
+  with direct SSH access, so a plain directory is simpler to inspect and back
+  up than Docker's volume abstraction. `bdus.override.yml` mounts these over
+  `bradypus.yml`'s own named-volume paths (a Compose override replaces a
+  mount at the same target). No manual `chown` is needed: both the `api` and
+  Postgres/PostGIS images fix up ownership of whatever is mounted there on
+  every boot
 - writes `.env` (`chmod 600`): `COMPOSE_PROJECT_NAME=bdus-<instance>`,
   `COMPOSE_FILE`, `BDUS_VERSION` (`--version`, else `config.env` `BDUS_VERSION`),
   `BDUS_PORT`, `BRADYPUS_ALLOW_NEW_APP`, and for a Postgres instance
-  `POSTGRES_USER/DB` + a **generated** `POSTGRES_PASSWORD`
+  `POSTGRES_USER/DB` + a **generated** `POSTGRES_PASSWORD`; for a Martin
+  instance, `MARTIN_PORT`
 - writes `bdus.override.yml` (env passthrough, `no-new-privileges`, `mem_limit`,
-  and the `postgres:16-alpine` service when `INSTANCE_<n>_POSTGRES=1`)
-- `docker compose pull && up -d`, restarts `bdus-fw` (needs sudo; warns otherwise),
-  waits up to 90 s for health
+  the bind mounts above, and — when `INSTANCE_<n>_POSTGRES=1` — a
+  `postgis/postgis:16-3.4-alpine` service instead of plain `postgres`; any
+  database can `CREATE EXTENSION postgis` or not, at no cost either way)
+- when `INSTANCE_<n>_MARTIN=1` (requires `POSTGRES=1`): adds the `martin`
+  service, `gis-data/` (bind mount for styles/sprites/fonts, mounted only into
+  `martin`, never `api`), and a `martin-config.yaml` scaffold — written once,
+  never overwritten, so hand-added per-app sources survive re-running `init`.
+  Martin refuses to start with zero configured tile sources, so the scaffold
+  includes a permanent no-op bootstrap function (`bdus init` creates it in the
+  shared `postgres` maintenance database) that keeps it running before any app
+  opts in. See "Vector tiles (Martin)" below
+- `docker compose pull && up -d` (postgres first, then the bootstrap function,
+  then everything else, when Martin is enabled — otherwise martin's first boot
+  can race the function's creation), restarts `bdus-fw` (needs sudo; warns
+  otherwise), waits up to 90 s for health
 
 `.env` is written **once**. Re-running refreshes `bradypus.yml` and
 `bdus.override.yml` but keeps `.env` (holds the generated password) unless
 `--force`.
 
+### Vector tiles (Martin)
+
+Opt-in per instance (`INSTANCE_<n>_MARTIN=1` + `_MARTIN_PORT`), for serving
+data that's maintained *outside* BraDypUS (typically QGIS) but relevant to a
+project — not a feature of the app itself. Martin has no built-in
+authentication; exposure is the published port filtered by the same
+`bdus-fw` IP allowlist as `BDUS_PORT`, not a reverse-proxy change.
+
+Attaching an app is manual (same philosophy as the QGIS-read-only-Postgres
+idea it grew out of — no bdus-ops automation): create a `gis` schema in that
+app's own database, a `<app>_gis` role (read-write, for QGIS) and a
+`<app>_martin` role (read-only, `GRANT SELECT ON ALL TABLES IN SCHEMA gis`),
+then add one more `postgres:` entry to `martin-config.yaml` scoped to
+`<app>_martin` with `auto_publish.from_schemas: [gis]`. Martin re-reads its
+config on its own (`reload_interval`, 10 min default) — no restart required.
+Style/sprite/font files go in `gis-data/<app>/styles/` etc. via plain
+`rsync`/`scp` — no dedicated command. Full walkthrough: `DEPLOY-RUNBOOK.md`
+§18.
+
+Keeping `gis` (not the app's own tables) in the same database as BraDypUS's
+data — rather than a separate database — is deliberate: schema-level `GRANT`s
+give Martin's and QGIS's roles the same isolation a separate database would,
+but joins/views between BraDypUS's own tables and `gis` stay native (a
+separate database would need `postgres_fdw`/`dblink`), and the existing
+`bdus backup`/`app export`/`app import` already operate at database
+granularity, so `gis` rides along for free.
+
 ## `bdus status`
 
 Read-only. Per instance: container states + running image, health endpoint,
-Postgres `pg_isready`, newest `*-files-*.tar.gz` backup and its age. Warns when
-the running api image does not match the `.env` pin. **Exit `1`** if any
-container is not running, health fails, Postgres fails, or the newest backup is
-older than `STALE_BACKUP_DAYS`. Suitable for a cron heartbeat.
+Postgres `pg_isready`, Martin `/health` (if enabled), newest `*-files-*.tar.gz`
+backup and its age. Warns when the running api image does not match the `.env`
+pin. **Exit `1`** if any container is not running, health fails, Postgres or
+Martin fails, or the newest backup is older than `STALE_BACKUP_DAYS`. Suitable
+for a cron heartbeat.
 
 ## `bdus update <instance|all> <X.Y.Z> [--yes] [--no-backup]`
 
@@ -65,11 +115,14 @@ older than `STALE_BACKUP_DAYS`. Suitable for a cron heartbeat.
 
 Into `<instance>/backups/`:
 
-- always `<project>-files-<ts>.tar.gz` — the `projects_data` volume
+- always `<project>-files-<ts>.tar.gz` — `data/projects/`
   (`config.json`, `.jwt_secret`, uploaded files, sqlite DBs), produced by
   `docker-backup.sh` inside the running `api` container
 - for a Postgres instance, also `<project>-pgall-<ts>.sql.gz` — `pg_dumpall`
-  (every database + roles)
+  (every database + roles — this already covers each app's `gis` schema, no
+  separate step needed)
+- for a Martin instance, also `<project>-gis-<ts>.tar.gz` — a plain host `tar`
+  of `gis-data/` (styles/sprites/fonts), no container involved
 
 Keeps the newest `BACKUP_RETENTION` of each kind. If `BACKUP_RSYNC_TARGET` is set
 and `--no-rsync` is not given, `rsync -a --delete` the folder to
@@ -80,14 +133,17 @@ and `--no-rsync` is not given, `rsync -a --delete` the folder to
 `docker compose stop api` → restore → `start api` → wait health.
 
 - `--files` defaults to the newest `<project>-files-*.tar.gz`; extracted into
-  `projects_data` via `docker-restore.sh` (files not in the archive are left
+  `data/projects/` via `docker-restore.sh` (files not in the archive are left
   alone)
 - `--db` (Postgres instances) defaults to the newest `<project>-pgall-*.sql.gz`;
   replayed with `psql -d postgres` (recreates databases as dumped)
 - confirms unless `--yes`
 
-For a full disaster-recovery restore into a fresh Postgres volume, `bdus init`
-the instance first, then `bdus restore`.
+`gis-data/` isn't restored by this command (it's a plain directory, not a
+volume) — untar the `-gis-` backup over it by hand if needed.
+
+For a full disaster-recovery restore into a fresh Postgres, `bdus init` the
+instance first, then `bdus restore`.
 
 ## `bdus app add <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--db-user R] [--password-stdin]`
 
@@ -122,7 +178,7 @@ Bundles a single app into one portable archive (`<app>-<instance>-<ts>.bdusapp.t
 in `<instance>/exports/`, or `--out`):
 
 - `manifest` — `app`, `engine`, `db_name`, `db_user`, `source_instance`, `bdus_version`, `exported_at`
-- `files.tar.gz` — `projects/<app>/` from the volume (`config.json`, `.jwt_secret`, `files/`, and for sqlite `db/bdus.sqlite`), via `docker-backup.sh <app>`
+- `files.tar.gz` — `projects/<app>/` from `data/projects/` (`config.json`, `.jwt_secret`, `files/`, and for sqlite `db/bdus.sqlite`), via `docker-backup.sh <app>`
 - `db.dump` — for pgsql, `pg_dump -Fc` of the app's database (data + users)
 
 An app is self-contained, so the archive is everything. Hot export: `pg_dump` is
@@ -144,8 +200,9 @@ should be ≥ the source):
 4. no restart; BraDypUS serves `projects/<app>/` on the next request
 
 `--force` replaces an app that already exists on the target (drops its dir and,
-for pgsql, its database and role first). PostGIS or other extensions must
-pre-exist on the target server.
+for pgsql, its database and role first). Every instance's Postgres is
+PostGIS-enabled by default now, so PostGIS-using apps import cleanly; any
+other, less common extension must still pre-exist on the target server.
 
 ## `bdus app delete <instance> <app> [--yes] [--no-backup] [--keep-role]`
 
@@ -168,7 +225,7 @@ No restart.
 ## `bdus psql <instance> [dbname]`
 
 `docker compose exec postgres psql -U <user> -d <dbname>` (default `postgres`).
-App databases are `bdus_<app>`.
+App databases are named `<app>` (no prefix, since `app add` v5.4.8 — see below).
 
 ## `bdus start | stop | restart | pull <instance|all>`
 
@@ -181,8 +238,10 @@ Checks invariants and exits non-zero on failure: docker enabled + `live-restore`
 `ufw` active, `bdus-fw.sh` + `bdus-fw.service` present/enabled, `DOCKER-USER`
 DROP rules present, backup cron installed, rsync target reachable; per instance:
 dir + `.env` (perms `600`) + `bdus.override.yml`, compose config valid, `api`
-running, Postgres healthy. Some host checks need passwordless `sudo` for
-`iptables`/`ufw`; they degrade to warnings otherwise.
+running, `data/projects/` present, Postgres healthy + `data/pgdata/` owned by
+uid 70 (if enabled), `gis-data/` present + Martin healthy (if enabled). Some
+host checks need passwordless `sudo` for `iptables`/`ufw`; they degrade to
+warnings otherwise.
 
 ---
 
@@ -201,6 +260,8 @@ running, Postgres healthy. Some host checks need passwordless `sudo` for
 | `BACKUP_RSYNC_TARGET` | `user@host:/path` for off-box copy; empty disables |
 | `PROXY_ALLOW_IPS` | IPs allowed through `DOCKER-USER` to the published ports |
 | `INSTANCE_<n>_PORT` | `<ip>:<port>` bind for the frontend |
-| `INSTANCE_<n>_POSTGRES` | `1` adds a shared Postgres service, `0` sqlite only |
+| `INSTANCE_<n>_POSTGRES` | `1` adds a shared Postgres (PostGIS-enabled) service, `0` sqlite only |
 | `INSTANCE_<n>_ALLOW_NEW_APP` | `0` (prod) or `1` (demo/edu) |
 | `INSTANCE_<n>_MEM_API` / `_MEM_FRONT` | container memory limits |
+| `INSTANCE_<n>_MARTIN` | `1` adds a Martin (vector tile) service — requires `POSTGRES=1` |
+| `INSTANCE_<n>_MARTIN_PORT` | `<ip>:<port>` bind for Martin (only used when `MARTIN=1`) |

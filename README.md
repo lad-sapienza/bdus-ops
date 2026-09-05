@@ -53,10 +53,29 @@ bdus status
 | restore prod (latest) | `bdus restore prod` |
 | add an app | `bdus app add prod --name X --engine pgsql --email …` |
 | list apps | `bdus app list` |
-| psql into prod | `bdus psql prod bdus_siti_scavo` |
+| psql into prod | `bdus psql prod siti_scavo` |
 | check for drift | `bdus doctor` |
 
 Full flag reference: [`docs/COMMANDS.md`](docs/COMMANDS.md).
+
+## Storage
+
+Each instance's data lives in plain host directories, not Docker-managed
+volumes — `<instance>/data/projects/` (uploaded files, sqlite DBs, config) and,
+for a Postgres instance, `<instance>/data/pgdata/`. This is a single-operator
+install with direct SSH access, so a directory you can `ls`/`du`/`rsync`
+without going through `docker exec` is simpler than Docker's volume
+abstraction — no code in `bradypus.yml` itself changes; `bdus.override.yml`
+just mounts these paths over its named-volume defaults. Ownership is handled
+by the containers themselves on every boot, no manual `chown` needed.
+
+## Vector tiles (optional, per app)
+
+Set `INSTANCE_<n>_MARTIN=1` (+ `_MARTIN_PORT`) to add a
+[Martin](https://maplibre.org/martin/) service for serving vector tiles from
+geodata maintained *outside* BraDypUS (typically QGIS) but relevant to a
+project. Off by default; not every app needs it. See `docs/COMMANDS.md` →
+"Vector tiles (Martin)" and `DEPLOY-RUNBOOK.md` §18 for attaching an app.
 
 ## Requirements
 

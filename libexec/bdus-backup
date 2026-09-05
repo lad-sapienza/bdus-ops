@@ -2,8 +2,9 @@
 # bdus backup [instance|all] [--no-rsync]
 #
 # Per instance, into <instance>/backups/ :
-#   sqlite-only  →  <project>-files-<ts>.tar.gz          (projects_data volume)
-#   with postgres →  the above  +  <project>-pgall-<ts>.sql.gz   (pg_dumpall)
+#   sqlite-only    →  <project>-files-<ts>.tar.gz          (data/projects)
+#   with postgres  →  the above  +  <project>-pgall-<ts>.sql.gz   (pg_dumpall)
+#   with martin    →  the above  +  <project>-gis-<ts>.tar.gz     (gis-data)
 #
 # Keeps the newest BACKUP_RETENTION of each kind, then rsyncs the folder to
 # BACKUP_RSYNC_TARGET/<project>/ when that is set (skip with --no-rsync).
@@ -46,14 +47,24 @@ while read -r i; do
     fi
   fi
 
-  # 3 — retention (no match for a given kind → glob fails; keep going)
-  for kind in files pgall; do
+  # 3 — gis-data (styles/sprites/fonts — plain host directory, no container needed)
+  if instance_has_martin "$i"; then
+    gtar="$dest/${proj}-gis-${ts}.tar.gz"
+    if tar czf "$gtar.part" -C "$(instance_dir "$i")" gis-data 2>/dev/null; then
+      mv "$gtar.part" "$gtar"; ok "  $(basename "$gtar")  ($(du -h "$gtar" | cut -f1))"
+    else
+      rm -f "$gtar.part"; bad "  gis-data backup failed"; rc=1
+    fi
+  fi
+
+  # 4 — retention (no match for a given kind → glob fails; keep going)
+  for kind in files pgall gis; do
     # shellcheck disable=SC2012
     ls -1t "$dest/${proj}-${kind}-"* 2>/dev/null | tail -n +"$((BACKUP_RETENTION + 1))" \
       | while read -r old; do rm -f "$old"; done || true
   done
 
-  # 4 — off-box copy
+  # 5 — off-box copy
   if [ "$rsync" -eq 1 ] && [ -n "$BACKUP_RSYNC_TARGET" ]; then
     if rsync -a --delete "$dest/" "${BACKUP_RSYNC_TARGET%/}/${proj}/"; then
       ok "  rsync → ${BACKUP_RSYNC_TARGET%/}/${proj}/"

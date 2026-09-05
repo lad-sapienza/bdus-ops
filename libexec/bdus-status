@@ -44,6 +44,13 @@ for i in $INSTANCES; do
     else bad "  postgres  not ready"; rc=1; fi
   fi
 
+  # martin
+  if instance_has_martin "$i"; then
+    if dc "$i" exec -T martin wget -q -O /dev/null http://localhost:3000/health >/dev/null 2>&1; then
+      ok "  martin  healthy"
+    else bad "  martin  not ready"; rc=1; fi
+  fi
+
   # newest backup
   # shellcheck disable=SC2012
   nb="$(ls -1t "$(backup_dir "$i")/${proj}-files-"*.tar.gz 2>/dev/null | head -1 || true)"
