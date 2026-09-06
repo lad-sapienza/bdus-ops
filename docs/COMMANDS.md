@@ -87,7 +87,10 @@ scoped to `<app>_martin` with `auto_publish.from_schemas: [gis]`. Martin
 re-reads its config on its own (`reload_interval`, 10 min default) — no
 restart required. Style/sprite/font files go in `gis-data/<app>/styles/`
 etc. via plain `rsync`/`scp` — no dedicated command. Full walkthrough:
-`DEPLOY-RUNBOOK.md` §18.
+`DEPLOY-RUNBOOK.md` §18. `MARTIN_PORT` above is a bare, plain-HTTP IP:port —
+for a real HTTPS hostname (recommended: some MapLibre/QGIS clients reject
+HTTP tiles from an HTTPS page) and an optional Basic Auth gate, both done by
+hand on the proxy VM, not by bdus-ops itself, see `DEPLOY-RUNBOOK.md` §21.
 
 `<app>_martin` only needs to be reachable *from Martin* (same compose
 network — no external exposure needed). `<app>_gis`, meant for QGIS Desktop
@@ -119,6 +122,10 @@ channel with the self-signed cert, no need to distribute it to clients.
 server-side — a client connecting without `sslmode=require` still gets a
 plaintext connection today. Enforcing that (a custom `pg_hba.conf` with
 `hostssl` rules) is a real follow-up, not implemented here.
+
+The IP:port above works as-is; for a DNS hostname instead of the bare proxy
+IP (e.g. `pg.bdus.lad-sapienza.it:5433`) — a naming convenience only, no
+change to the TLS/passthrough itself — see `DEPLOY-RUNBOOK.md` §21.
 
 Keeping `gis` (not the app's own tables) in the same database as BraDypUS's
 data — rather than a separate database — is deliberate: schema-level `GRANT`s

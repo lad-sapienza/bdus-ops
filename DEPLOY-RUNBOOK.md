@@ -4,8 +4,6 @@ Portare in produzione l'istanza **prod** e l'istanza **demo/edu** sulla stessa V
 privata, isolate fra loro, raggiungibili solo dalla VM proxy che termina TLS e
 mappa i domini. Comandi eseguibili in ordine; ogni fase è indipendente e ripetibile.
 
-> Copia allineata all'artifact `https://claude.ai/code/artifact/a5bbd8a9-8e01-4283-b3ca-6f064e0371b7`.
-
 | | |
 |---|---|
 | VM app | **192.168.4.39** — Debian 13, utente **debian**, Docker CE installato |
@@ -14,7 +12,7 @@ mappa i domini. Comandi eseguibili in ordine; ogni fase è indipendente e ripeti
 | Istanza **demo** | bind **192.168.4.39:8082** · **/srv/bradypus/demo** · progetto **bdus-demo** · volume **bdus-demo_projects_data** · solo **sqlite** |
 | Versione | BraDypUS **5.4.8** (immagini GHCR pinnate) |
 | Nuove app | wizard HTTP → **sempre** `BRADYPUS_ALLOW_NEW_APP=1` (5.4.7) · `bdus app add` non apre finestra; pgsql = ruolo isolato per app (5.4.8) |
-| Domini (sul proxy) | **bdus.lad-sapienza.it** (prod) · **demo.bdus.lad-sapienza.it** (demo) · cert SAN unico · file vhost **senza** `.conf` |
+| Domini (sul proxy) | **bdus.lad-sapienza.it** (prod) · **demo.bdus.lad-sapienza.it** (demo) · cert SAN unico · file vhost **senza** `.conf`. Opzionale, stesso cert SAN esteso: `vtiles.*`/`pg.*` per Martin/Postgres — Fase 21 |
 
 L'ordine conta: **firewall prima dei container**.
 
@@ -674,6 +672,8 @@ _Ricorrente ESERCIZIO_
 
 Serve tile vettoriali da dati geografici mantenuti **fuori** da BraDypUS (es. QGIS) ma pertinenti a un progetto — non è una feature dell'app, è un servizio di deploy in più, spento di default e attivabile per singola app. Non tutte le app ne hanno bisogno.
 
+`MARTIN_PORT` qui sotto è solo il bind privato, filtrato da `bdus-fw` — HTTP in chiaro, IP nudo. Per darlo in pasto a un client via HTTPS con un hostname vero (consigliato: molti client MapLibre/QGIS rifiutano tile HTTP da una pagina HTTPS) → **Fase 21, sulla VM proxy**.
+
 **Attivazione a livello di istanza** (una volta sola, in `config.env`):
 
 ```bash
@@ -780,11 +780,114 @@ proxy (o di un IP aggiunto a mano lì per un accesso diretto occasionale) —
 qui non stiamo allargando quell'allowlist, stiamo aprendo un canale in più
 attraverso lo stesso punto già fidato.
 
-**Lato VM proxy — a mano** (fuori dallo scope di bdus-ops, come il resto di
-questa VM): un blocco `stream {}` — è un contesto nginx **di primo livello**,
-non qualcosa che va dentro un `server {}`/vhost esistente, quindi un tipo di
-modifica nuovo su questa VM, non un'aggiunta alla configurazione HTTP già
-presente (Fasi 12–13):
+> **Cosa NON copre** — `pg_hba.conf` non è stato toccato per *richiedere*
+> TLS: un client che si connette senza `sslmode=require` funziona ancora, in
+> chiaro. Irrigidire questo (regole `hostssl` dedicate) resta un possibile
+> passo successivo, non fatto qui — così nessuno scambia "TLS disponibile"
+> per "TLS obbligatorio".
+
+> **Cosa consegnare all'utente QGIS** — mai il ruolo superuser: sempre
+> `<app>_gis` (Fase 18, `bdus app gis <instance> <app> --write`), con
+> `sslmode=require` nella connessione. Le credenziali sono in
+> `projects/<app>/gis-config.json` sulla VM app.
+
+Questo basta per un accesso diretto dalla stessa rete della VM proxy (o da un
+IP aggiunto a mano a `PROXY_ALLOW_IPS`). Per farlo raggiungere anche dal resto
+di internet — passthrough TCP sulla VM proxy + un hostname pulito invece
+dell'IP nudo (e, mentre ci siamo, lo stesso per Martin, in HTTPS) → **Fase 21,
+sulla VM proxy**.
+
+## 21 · VM proxy — hostname per Martin (HTTPS) e Postgres (opzionale)  
+_Fase 21 VM PROXY_
+
+Le fasi 12–13 hanno già dato un hostname HTTPS all'app principale. Martin e
+Postgres, quando pubblicati (Fasi 18 e 20), restano invece su un IP nudo:
+questa fase chiude il cerchio, con lo stesso schema di naming per entrambi —
+un sottodominio/hostname per **servizio**, non per porta, così il prefisso
+resta leggibile anche se domani la porta cambia.
+
+| servizio | prod | demo | note |
+|---|---|---|---|
+| App | `bdus.lad-sapienza.it` | `demo.bdus.lad-sapienza.it` | già Fase 13 |
+| Martin (tile vettoriali) | `vtiles.bdus.lad-sapienza.it` | `vtiles.demo.bdus.lad-sapienza.it` | `vtiles`, non `tiles`: lascia spazio a un futuro servizio raster (`rtiles`) senza ambiguità fra i due |
+| Postgres | `pg.bdus.lad-sapienza.it:5433` | `pg.demo.bdus.lad-sapienza.it:5434` | solo hostname DNS — Postgres non è HTTP, non c'è un vhost dietro, la porta resta nella connection string |
+
+### Martin in HTTPS (`vtiles.*`)
+
+Stesso pattern delle fasi 12–13: certificato SAN esteso (nginx termina TLS,
+poi `proxy_pass` in chiaro verso l'IP privato di `MARTIN_PORT` — a differenza
+di Postgres, Martin parla HTTP puro, nessun problema di negoziazione a
+livello di protocollo).
+
+```bash
+# estendi il certificato SAN esistente con i due nuovi nomi
+sudo certbot --nginx \
+  -d bdus.lad-sapienza.it -d demo.bdus.lad-sapienza.it \
+  -d vtiles.bdus.lad-sapienza.it -d vtiles.demo.bdus.lad-sapienza.it
+```
+
+```nginx
+# /etc/nginx/sites-available/bdus-prod-vtiles
+server {
+    listen 80;
+    server_name vtiles.bdus.lad-sapienza.it;
+    return 301 https://$host$request_uri;
+}
+server {
+    listen 443 ssl http2;
+    server_name vtiles.bdus.lad-sapienza.it;
+
+    ssl_certificate /etc/letsencrypt/live/bdus.lad-sapienza.it/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/bdus.lad-sapienza.it/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    location / {
+        proxy_pass http://192.168.4.39:8091;   # MARTIN_PORT di prod
+        proxy_set_header Host $host;
+    }
+}
+```
+
+(replica identica per `demo`, `server_name vtiles.demo.bdus.lad-sapienza.it`,
+`proxy_pass` verso `MARTIN_PORT` di demo). Verifica:
+
+```bash
+curl https://vtiles.bdus.lad-sapienza.it/catalog
+```
+
+> **Basic auth, opzionale** — Martin non ha autenticazione propria (già
+> notato in Fase 18); se un'istanza ospita dati che non vuoi lasciare dietro
+> il solo "URL non pubblicizzato", puoi chiudere l'intero vhost `vtiles`
+> dietro utente/password a livello di proxy — non è il default consigliato
+> (aggiunge una credenziale in più da distribuire e non serve a chi comunque
+> vuole solo restringere per IP), ma è una ricetta pronta se serve:
+>
+> ```bash
+> sudo apt-get install -y apache2-utils   # per htpasswd
+> sudo htpasswd -c /etc/nginx/.htpasswd-vtiles-prod martin_user
+> ```
+>
+> Poi, dentro il blocco `location / { … }` del vhost `vtiles` qui sopra:
+>
+> ```nginx
+>     auth_basic           "Martin";
+>     auth_basic_user_file /etc/nginx/.htpasswd-vtiles-prod;
+> ```
+>
+> Un client MapLibre/QGIS che consuma le tile deve poi includere le
+> credenziali nell'URL (`https://martin_user:pass@vtiles.bdus.lad-sapienza.it/…`)
+> o nell'header `Authorization` — verifica caso per caso che il client scelto
+> lo supporti prima di attivarla in produzione.
+
+### Postgres: passthrough TCP + hostname (`pg.*`)
+
+Un blocco `stream {}` — è un contesto nginx **di primo livello**, non
+qualcosa che va dentro un `server {}`/vhost esistente come quelli di Martin
+appena visti, quindi un tipo di modifica nuovo su questa VM, non un'aggiunta
+alla configurazione HTTP già presente (Fasi 12–13 e il `vtiles` qui sopra):
 
 ```nginx
 # /etc/nginx/stream.d/bdus-prod-postgres.conf (o dentro nginx.conf, fuori da http {})
@@ -797,26 +900,21 @@ stream {
 }
 ```
 
-Niente `ssl_preread`/`ssl` qui: il TLS termina su Postgres, non sulla VM
-proxy — questo blocco fa solo passthrough TCP grezzo. Verifica dal client:
+(replica per `demo`: `listen 5434`, `proxy_pass` verso il `POSTGRES_PORT` di
+demo). Niente `ssl_preread`/`ssl` qui: il TLS termina su Postgres (Fase 20),
+non sulla VM proxy — questo blocco fa solo passthrough TCP grezzo.
+
+Un record DNS A/AAAA `pg.bdus.lad-sapienza.it` → stesso IP pubblico di
+`bdus.lad-sapienza.it` (cambia solo il nome) evita di dover ricordare o
+distribuire l'IP nudo del proxy — la porta (`5433`/`5434`) resta comunque il
+discriminante fra prod e demo, l'hostname è solo comodità:
 
 ```bash
-psql "host=<IP-pubblico-proxy> port=5433 dbname=siti_scavo user=siti_scavo_gis sslmode=require" -c '\conninfo'
+psql "host=pg.bdus.lad-sapienza.it port=5433 dbname=siti_scavo user=siti_scavo_gis sslmode=require" -c '\conninfo'
 # deve riportare "SSL connection (protocol: TLSv1.3, ...)"
 ```
 
-> **Cosa NON copre** — `pg_hba.conf` non è stato toccato per *richiedere*
-> TLS: un client che si connette senza `sslmode=require` funziona ancora, in
-> chiaro. Irrigidire questo (regole `hostssl` dedicate) resta un possibile
-> passo successivo, non fatto qui — così nessuno scambia "TLS disponibile"
-> per "TLS obbligatorio".
-
-> **Cosa consegnare all'utente QGIS** — mai il ruolo superuser: sempre
-> `<app>_gis` (Fase 18, `bdus app gis <instance> <app> --write`), con
-> `sslmode=require` nella connessione. Le credenziali sono in
-> `projects/<app>/gis-config.json` sulla VM app.
-
 ---
 
-_BraDypUS v5.4.8 · runbook aggiornato il 2026-09-02, bind mount + Martin/PostGIS + conversione sqlite→pgsql il 2026-09-05, TLS su Postgres pubblicato il 2026-09-06 · immagini ghcr.io/lad-sapienza/bdus-api · bdus-app_
+_BraDypUS v5.4.8 · runbook aggiornato il 2026-09-02, bind mount + Martin/PostGIS + conversione sqlite→pgsql il 2026-09-05, TLS su Postgres pubblicato + hostname HTTPS per Martin/Postgres sul proxy il 2026-09-06 · immagini ghcr.io/lad-sapienza/bdus-api · bdus-app_
 

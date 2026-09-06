@@ -83,20 +83,15 @@ least-privilege role for Martin and, with `--write`, one for QGIS. See
 
 ## Where things are reachable
 
-The public HTTPS domain (e.g. `https://bdus.lad-sapienza.it` for `prod`,
-`https://demo.bdus.lad-sapienza.it` for `demo`) only ever reaches the main
-app — that's the reverse-proxy VM (done by hand, see `DEPLOY-RUNBOOK.md`
-Parte B), and it only forwards to `BDUS_PORT`. Martin and (if enabled)
-Postgres are **not** behind that proxy and have **no public domain** — they
-sit directly on the app VM's private IP, on their own ports, reachable only
-from whatever `PROXY_ALLOW_IPS` allows through `bdus-fw` (typically just the
-proxy VM itself; add your own IP there too if you need to reach them
-directly, e.g. from QGIS on your own machine):
+Internally, every published port sits on the app VM's private IP, filtered
+by `bdus-fw`/`PROXY_ALLOW_IPS` (typically just the proxy VM itself; add your
+own IP there too if you need to reach one directly, e.g. from QGIS on your
+own machine):
 
-| instance | public app URL | Martin (if `MARTIN=1`) | Postgres (if `POSTGRES_PORT` set) |
+| instance | app (`BDUS_PORT`) | Martin (if `MARTIN=1`) | Postgres (if `POSTGRES_PORT` set) |
 |---|---|---|---|
-| `prod` | `https://bdus.lad-sapienza.it` | `http://192.168.4.39:8091` (plain HTTP, no TLS) | `192.168.4.39:5433` (Postgres wire protocol + TLS, e.g. for QGIS) |
-| `demo` | `https://demo.bdus.lad-sapienza.it` | `http://192.168.4.39:8092` | `192.168.4.39:5434` |
+| `prod` | `192.168.4.39:8081` | `http://192.168.4.39:8091` (plain HTTP, no TLS) | `192.168.4.39:5433` (Postgres wire protocol + TLS, e.g. for QGIS) |
+| `demo` | `192.168.4.39:8082` | `http://192.168.4.39:8092` | `192.168.4.39:5434` |
 
 The Martin ports match this project's own `config.env.example`. Postgres is
 **off by default** — `config.env.example` ships `INSTANCE_<n>_POSTGRES_PORT`
@@ -109,16 +104,40 @@ you actually hand out is a specific app's `<app>_gis` (read-write, for QGIS)
 or `<app>_martin` (read-only) role, from `bdus app gis` (see below), never
 the shared superuser.
 
-Unlike Martin, the published Postgres port is TLS-protected: `bdus init`
-generates a self-signed cert for it automatically and restarts Postgres with
-`ssl=on` (client side: add `sslmode=require`) — an IP allowlist alone doesn't
-fit how QGIS is actually used (home, travel, field work, unpredictable source
-IPs), so encryption + credentials carry the weight here instead. From the
-public internet this same port is reached through the proxy VM doing plain
-TCP passthrough (`stream {}` in nginx, no TLS termination there — TLS stays
-end-to-end to Postgres itself), set up by hand per `DEPLOY-RUNBOOK.md` §20.
-`bdus-fw`/`PROXY_ALLOW_IPS` on the app VM is untouched by this — it still
-trusts only the proxy VM, same as every other published port.
+From the public internet, none of these bare IP:port pairs are meant to be
+handed to anyone — the reverse-proxy VM (done by hand, see
+`DEPLOY-RUNBOOK.md` Parte B) is what gives each service a real hostname, one
+subdomain per **service** so a port change never renames anything a client
+has already been given:
+
+| service | prod | demo |
+|---|---|---|
+| app | `https://bdus.lad-sapienza.it` | `https://demo.bdus.lad-sapienza.it` |
+| Martin (optional, §21) | `https://vtiles.bdus.lad-sapienza.it` | `https://vtiles.demo.bdus.lad-sapienza.it` |
+| Postgres (optional, §21) | `pg.bdus.lad-sapienza.it:5433` | `pg.demo.bdus.lad-sapienza.it:5434` |
+
+The app's hostnames are mandatory (Parte B, §12–13). Martin's and Postgres's
+are opt-in on top of their own opt-in flags above, and are exactly that:
+naming convenience over the same underlying port — `vtiles` (not `tiles`) is
+deliberate, leaving room for a future raster-tile service (`rtiles`) without
+the two ever colliding.
+
+**Postgres** is TLS-protected end-to-end regardless of whether the hostname
+step is done: `bdus init` generates a self-signed cert automatically and
+restarts Postgres with `ssl=on` (client side: add `sslmode=require`) — an IP
+allowlist alone doesn't fit how QGIS is actually used (home, travel, field
+work, unpredictable source IPs), so encryption + credentials carry the
+weight here instead. The proxy VM only ever does plain TCP passthrough for
+it (`stream {}` in nginx, no TLS termination there — TLS stays end-to-end to
+Postgres itself). `bdus-fw`/`PROXY_ALLOW_IPS` on the app VM is untouched by
+any of this — it still trusts only the proxy VM, same as every other
+published port. See `DEPLOY-RUNBOOK.md` §20 (the automatic app-VM part) and
+§21 (the manual proxy-VM hostname + Martin-HTTPS part).
+
+**Martin** has no authentication of its own; putting it behind an HTTPS
+hostname also unlocks an optional HTTP Basic Auth gate at the proxy if a
+given instance's tile data shouldn't rely on "the URL isn't public" alone —
+documented as an opt-in recipe, not a default, in §21.
 
 ## Requirements
 
