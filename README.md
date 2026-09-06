@@ -55,6 +55,7 @@ bdus status
 | add an app | `bdus app add prod --name X --engine pgsql --email …` |
 | convert sqlite app to pgsql | `bdus app to-pgsql prod X` |
 | list apps | `bdus app list` |
+| bundle a sqlite app folder for another server (laptop) | `bdus app pack ./X` → `scp` → `bdus app import` |
 | psql into prod | `bdus psql prod siti_scavo` |
 | check for drift | `bdus doctor` |
 
@@ -441,6 +442,50 @@ in `<instance>/exports/`, or `--out`):
 An app is self-contained, so the archive is everything, GIS/Martin roles
 included. Hot export: `pg_dump` is a consistent snapshot; `files/` is captured
 as-is.
+
+### `bdus app pack <dir> [--name <slug>] [--out FILE]`
+
+The dev-machine counterpart of `export`, for an app you hold only as a plain
+directory — typically a BraDypUS **v4** app pulled off the old server and
+migrated to v5 in a local instance, on its way to `prod`. Runs with no
+`config.env`, no running instance and no Docker — just `bash` and `tar` — so it
+works on your laptop.
+
+It writes the **same** `<name>-pack-<ts>.bdusapp.tgz` layout `export` does, so
+`bdus app import` ingests it with no special case:
+
+- `manifest` — `app` and `engine=sqlite` (the two keys `import` reads), plus
+  empty `db_name` / `db_user` / `bdus_version`, `source_instance=(pack)` and
+  `packed_from=<abs path>` for provenance
+- `files.tar.gz` — a `tar` of `<dir>/` whose single top-level entry is `--name`
+  (default: the directory's own name), exactly the shape `docker-restore.sh`
+  expects. `.DS_Store` and macOS xattrs are dropped so GNU tar on the server
+  extracts without warnings
+- no `db.dump` — **sqlite only**. A pgsql app's data lives in Postgres, outside
+  the folder; `export` it from a live instance instead. `pack` refuses if
+  `<dir>/config.json` has a `db_engine` other than `sqlite`, or if
+  `<dir>/db/bdus.sqlite` is missing
+
+`--name` must be `[a-z0-9_]`; it becomes the app's directory (hence its URL) on
+the target. Packing under the folder's existing name streams straight from it;
+renaming stages a copy first.
+
+Finish on the server with `bdus app import <instance> <archive>` — which unpacks
+**through the `api` container**, so the restored `projects/<app>/` lands owned
+by `www-data` regardless of having been packed on a Mac. Add `--new-jwt` to that
+`import` when the app is being cloned to a different site (any `.jwt_secret` in
+the tree travels with it).
+
+```bash
+# laptop: v4 app pulled to ~/dl/siti_scavo and migrated in a local v5 instance
+bdus app pack ~/dl/siti_scavo --name siti_scavo
+scp siti_scavo-pack-*.bdusapp.tgz prod-host:/tmp/
+ssh prod-host 'bdus app import prod /tmp/siti_scavo-pack-*.bdusapp.tgz'
+```
+
+If that local v5 instance is itself bdus-ops-managed, `bdus app export local
+siti_scavo` already produces the same archive — `pack` is for when the app is
+just a directory with no instance around it.
 
 ### `bdus app import <instance> <archive> [--force] [--new-jwt]`
 
@@ -836,6 +881,10 @@ psql "host=pg.bdus.lad-sapienza.it port=5433 dbname=siti_scavo user=siti_scavo_g
 - The app VM needs network access to `ghcr.io` to pull images (and to Docker
   Hub too, only if you ever run `bdus app to-pgsql` — it pulls
   `dimitri/pgloader` on demand).
+- `bdus app pack` is the one subcommand that also runs off the app VM (on a
+  laptop, to bundle a pulled-off app folder): it needs only `bash` and `tar`
+  — no Docker, no `config.env`, no instance. Its output feeds `bdus app
+  import` on the server unchanged.
 
 ## Layout
 

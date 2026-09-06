@@ -35,6 +35,8 @@ Applications
   app to-pgsql <instance> <app> [--yes]   convert a live sqlite app to pgsql in place (pgloader)
   app list   [inst|all]
   app export <instance> <app> [--out FILE]      one portable archive (tree + pg_dump)
+  app pack   <dir> [--name <slug>] [--out FILE]   same archive from a plain sqlite app folder
+                          (dev machine: no config.env/instance/Docker) — feed to `app import`
   app import <instance> <archive> [--force] [--new-jwt]   the reverse, incl. into another instance
   app delete <instance> <app> [--yes] [--no-backup] [--keep-role]   exports first, then removes
 
