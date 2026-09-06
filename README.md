@@ -115,7 +115,8 @@ Creates `$BDUS_ROOT/<instance>/` from the `INSTANCE_<instance>_*` keys in
   if `INSTANCE_<n>_POSTGRES_PORT` is set — publishes Postgres itself, with
   TLS, see below); for a Martin instance, `MARTIN_PORT`
 - writes `bdus.override.yml` (env passthrough, `no-new-privileges`, `mem_limit`,
-  the bind mounts above, and — when `INSTANCE_<n>_POSTGRES=1` — a
+  the bind mounts above, the optional `BRADYPUS_CORS_ORIGIN` from
+  `INSTANCE_<n>_CORS_ORIGIN`, and — when `INSTANCE_<n>_POSTGRES=1` — a
   `postgis/postgis:16-3.4-alpine` service instead of plain `postgres`; any
   database can `CREATE EXTENSION postgis` or not, at no cost either way)
 - when `INSTANCE_<n>_MARTIN=1` (requires `POSTGRES=1`): adds the `martin`
@@ -134,7 +135,8 @@ Creates `$BDUS_ROOT/<instance>/` from the `INSTANCE_<instance>_*` keys in
   health
 
 `.env` is written **once**. Re-running refreshes `bradypus.yml` and
-`bdus.override.yml` but keeps `.env` (holds the generated password) unless
+`bdus.override.yml` (a changed `INSTANCE_<n>_CORS_ORIGIN`, `MEM_*`, or image
+ref is picked up here) but keeps `.env` (holds the generated password) unless
 `--force` — **never use `--force` just to pick up a bind-mount/Martin change
 on an existing instance**, it rotates `POSTGRES_PASSWORD` while the database
 itself still has the old one. The one exception: flipping `MARTIN=1` or
@@ -586,6 +588,7 @@ to open that same catalog file — it would have caught this immediately.
 | `INSTANCE_<n>_PORT` | `<ip>:<port>` bind for the frontend |
 | `INSTANCE_<n>_POSTGRES` | `1` adds a shared Postgres (PostGIS-enabled) service, `0` sqlite only |
 | `INSTANCE_<n>_ALLOW_NEW_APP` | `0` (prod) or `1` (demo/edu) |
+| `INSTANCE_<n>_CORS_ORIGIN` | optional: sets the API's `BRADYPUS_CORS_ORIGIN` — one or more allowed origins, **space-separated** (exact match, no wildcard). Quote it in `config.env` when it contains a space. Empty (default) leaves it unset (no CORS headers). Baked into `bdus.override.yml`, so a plain `bdus init <instance>` re-run picks up a change |
 | `INSTANCE_<n>_MEM_API` / `_MEM_FRONT` | container memory limits |
 | `INSTANCE_<n>_MARTIN` | `1` adds a Martin (vector tile) service — requires `POSTGRES=1` |
 | `INSTANCE_<n>_MARTIN_PORT` | `<ip>:<port>` bind for Martin (only used when `MARTIN=1`) |

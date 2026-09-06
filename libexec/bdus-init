@@ -45,6 +45,7 @@ instance_known "$inst" || die "unknown instance '$inst' (config INSTANCES=\"$INS
 port="$(cfg_instance "$inst" PORT)"
 pg="$(cfg_instance "$inst" POSTGRES)"
 allow="$(cfg_instance "$inst" ALLOW_NEW_APP)"
+cors="$(cfg_instance "$inst" CORS_ORIGIN)"
 mem_api="$(cfg_instance "$inst" MEM_API)"
 mem_front="$(cfg_instance "$inst" MEM_FRONT)"
 martin="$(cfg_instance "$inst" MARTIN)"
@@ -198,6 +199,17 @@ services:
     environment:
       - BRADYPUS_DEBUG=\${BRADYPUS_DEBUG:-0}
       - BRADYPUS_ALLOW_NEW_APP=\${BRADYPUS_ALLOW_NEW_APP:-0}
+EOF
+  # BRADYPUS_CORS_ORIGIN (allowed origins for the API — space-separated, exact
+  # match) — emitted only when INSTANCE_<n>_CORS_ORIGIN is set. Baked in
+  # literally rather than routed through .env like DEBUG/ALLOW_NEW_APP: the
+  # origin tracks the frontend's public hostname and must land on a plain
+  # `bdus init` re-run (.env is write-once). Quoted so a multi-origin (spaced)
+  # value can't trip YAML; `dc config` below still validates the result.
+  if [ -n "$cors" ]; then
+    printf '      - "BRADYPUS_CORS_ORIGIN=%s"\n' "$cors"
+  fi
+  cat <<EOF
     security_opt:
       - no-new-privileges:true
     mem_limit: ${mem_api}
