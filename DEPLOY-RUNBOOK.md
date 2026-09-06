@@ -734,7 +734,89 @@ Fa un export di sicurezza da solo (obbligatorio, non disattivabile — questa ca
 
 Verificato dal vivo: i nomi dei vincoli FK sulle tabelle di sistema restano esattamente quelli nativi di BraDypUS (es. `fl_file_fk`) — pgloader in modalità dati-soli li legge dal target invece di inventarne di nuovi.
 
+## 20 · Postgres pubblicato con TLS (accesso diretto da QGIS/campo)  
+_Opzionale ESERCIZIO_
+
+`bdus-fw`/`PROXY_ALLOW_IPS` (Fase 03) protegge le porte pubblicate con un
+allowlist di IP condiviso fra tutte le porte di tutte le istanze — adatto a
+`BDUS_PORT`/`MARTIN_PORT` (li raggiunge solo la VM proxy), ma non a un uso
+diretto di Postgres da QGIS: chi lavora da casa, in mobilità o sul campo non
+conosce il proprio IP in anticipo, quindi un allowlist non è la difesa giusta
+qui. La soluzione: la porta Postgres resta **sconosciuta esternamente** (mai
+esposta direttamente su internet), e a farla da tramite è la VM proxy — già
+l'unico punto fidato dall'app VM — con un canale TCP puro fino a Postgres,
+che si autentica da solo via TLS + credenziali (non via IP).
+
+**Perché non un proxy TLS generico (nginx `stream`+`ssl`)** — verificato,
+non assunto: Postgres negozia il proprio TLS in modo non standard (il client
+manda un pacchetto `SSLRequest` di 8 byte, il server risponde `S`/`N`, *poi*
+parte l'handshake TLS vero — non è un `ClientHello` TLS come primi byte sul
+filo). Un proxy TLS generico non lo riconosce (caso reale documentato:
+Envoy fallisce con `parseClientHello failed (WRONG_VERSION_NUMBER)` contro
+client Postgres). La soluzione standard — usata da chiunque esponga Postgres
+direttamente (RDS, Supabase, ecc.) — è **TLS su Postgres stesso**, con la VM
+proxy che fa solo passthrough TCP puro, senza terminare nulla.
+
+**Lato VM app — automatico**, un flag in `config.env`:
+
+```bash
+INSTANCE_prod_POSTGRES_PORT=192.168.4.39:5433   # come MARTIN_PORT: IP privato, mai 0.0.0.0
+bdus init prod        # SENZA --force: aggiunge solo POSTGRES_PORT a .env, password Postgres invariata
+```
+
+`bdus init` genera da solo un certificato self-signed (dentro il container
+Postgres già in esecuzione — `initdb` rifiuta di partire su un `PGDATA` non
+vuoto, quindi non si può precaricarlo prima del primo avvio), lo salva in
+`data/pgdata/tls/` (segue il resto dei dati del cluster: stesso bind mount,
+stesso backup) e riavvia Postgres con `ssl=on` e i relativi
+`ssl_cert_file`/`ssl_key_file` (le impostazioni SSL non sono ricaricabili a
+caldo). Rieseguire `bdus init` in seguito non rigenera il certificato né
+ricrea il container — no-op quando non c'è nulla da cambiare. Funziona
+identico sia su un'istanza nuova sia — come `prod` oggi — su un cluster già
+esistente a cui si accende `POSTGRES_PORT` in un secondo momento.
+
+`bdus-fw`/`PROXY_ALLOW_IPS` **non cambia**: continua a fidarsi solo della VM
+proxy (o di un IP aggiunto a mano lì per un accesso diretto occasionale) —
+qui non stiamo allargando quell'allowlist, stiamo aprendo un canale in più
+attraverso lo stesso punto già fidato.
+
+**Lato VM proxy — a mano** (fuori dallo scope di bdus-ops, come il resto di
+questa VM): un blocco `stream {}` — è un contesto nginx **di primo livello**,
+non qualcosa che va dentro un `server {}`/vhost esistente, quindi un tipo di
+modifica nuovo su questa VM, non un'aggiunta alla configurazione HTTP già
+presente (Fasi 12–13):
+
+```nginx
+# /etc/nginx/stream.d/bdus-prod-postgres.conf (o dentro nginx.conf, fuori da http {})
+stream {
+    server {
+        listen 5433;                              # porta pubblica, scelta a piacere
+        proxy_pass 192.168.4.39:5433;              # POSTGRES_PORT della VM app
+        proxy_connect_timeout 5s;
+    }
+}
+```
+
+Niente `ssl_preread`/`ssl` qui: il TLS termina su Postgres, non sulla VM
+proxy — questo blocco fa solo passthrough TCP grezzo. Verifica dal client:
+
+```bash
+psql "host=<IP-pubblico-proxy> port=5433 dbname=siti_scavo user=siti_scavo_gis sslmode=require" -c '\conninfo'
+# deve riportare "SSL connection (protocol: TLSv1.3, ...)"
+```
+
+> **Cosa NON copre** — `pg_hba.conf` non è stato toccato per *richiedere*
+> TLS: un client che si connette senza `sslmode=require` funziona ancora, in
+> chiaro. Irrigidire questo (regole `hostssl` dedicate) resta un possibile
+> passo successivo, non fatto qui — così nessuno scambia "TLS disponibile"
+> per "TLS obbligatorio".
+
+> **Cosa consegnare all'utente QGIS** — mai il ruolo superuser: sempre
+> `<app>_gis` (Fase 18, `bdus app gis <instance> <app> --write`), con
+> `sslmode=require` nella connessione. Le credenziali sono in
+> `projects/<app>/gis-config.json` sulla VM app.
+
 ---
 
-_BraDypUS v5.4.8 · runbook aggiornato il 2026-09-02, bind mount + Martin/PostGIS + conversione sqlite→pgsql il 2026-09-05 · immagini ghcr.io/lad-sapienza/bdus-api · bdus-app_
+_BraDypUS v5.4.8 · runbook aggiornato il 2026-09-02, bind mount + Martin/PostGIS + conversione sqlite→pgsql il 2026-09-05, TLS su Postgres pubblicato il 2026-09-06 · immagini ghcr.io/lad-sapienza/bdus-api · bdus-app_
 

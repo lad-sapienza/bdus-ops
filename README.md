@@ -81,6 +81,45 @@ not hand-typed SQL: `bdus app add ... --gis [--gis-write]` (or `bdus app gis
 least-privilege role for Martin and, with `--write`, one for QGIS. See
 `docs/COMMANDS.md` → "`bdus app gis`" and `DEPLOY-RUNBOOK.md` §18.
 
+## Where things are reachable
+
+The public HTTPS domain (e.g. `https://bdus.lad-sapienza.it` for `prod`,
+`https://demo.bdus.lad-sapienza.it` for `demo`) only ever reaches the main
+app — that's the reverse-proxy VM (done by hand, see `DEPLOY-RUNBOOK.md`
+Parte B), and it only forwards to `BDUS_PORT`. Martin and (if enabled)
+Postgres are **not** behind that proxy and have **no public domain** — they
+sit directly on the app VM's private IP, on their own ports, reachable only
+from whatever `PROXY_ALLOW_IPS` allows through `bdus-fw` (typically just the
+proxy VM itself; add your own IP there too if you need to reach them
+directly, e.g. from QGIS on your own machine):
+
+| instance | public app URL | Martin (if `MARTIN=1`) | Postgres (if `POSTGRES_PORT` set) |
+|---|---|---|---|
+| `prod` | `https://bdus.lad-sapienza.it` | `http://192.168.4.39:8091` (plain HTTP, no TLS) | `192.168.4.39:5433` (Postgres wire protocol + TLS, e.g. for QGIS) |
+| `demo` | `https://demo.bdus.lad-sapienza.it` | `http://192.168.4.39:8092` | `192.168.4.39:5434` |
+
+The Martin ports match this project's own `config.env.example`. Postgres is
+**off by default** — `config.env.example` ships `INSTANCE_<n>_POSTGRES_PORT`
+empty on purpose, so the `5433`/`5434` above are just a suggestion for when
+you do set it (pick anything free; it's a different port from Martin's and
+from Postgres's own internal `5432` so the two never collide if both ever
+run on the same host). Both flags are opt-in;
+Postgres itself being reachable at all doesn't mean much on its own — what
+you actually hand out is a specific app's `<app>_gis` (read-write, for QGIS)
+or `<app>_martin` (read-only) role, from `bdus app gis` (see below), never
+the shared superuser.
+
+Unlike Martin, the published Postgres port is TLS-protected: `bdus init`
+generates a self-signed cert for it automatically and restarts Postgres with
+`ssl=on` (client side: add `sslmode=require`) — an IP allowlist alone doesn't
+fit how QGIS is actually used (home, travel, field work, unpredictable source
+IPs), so encryption + credentials carry the weight here instead. From the
+public internet this same port is reached through the proxy VM doing plain
+TCP passthrough (`stream {}` in nginx, no TLS termination there — TLS stays
+end-to-end to Postgres itself), set up by hand per `DEPLOY-RUNBOOK.md` §20.
+`bdus-fw`/`PROXY_ALLOW_IPS` on the app VM is untouched by this — it still
+trusts only the proxy VM, same as every other published port.
+
 ## Requirements
 
 - Debian (bash 4+), Docker CE + `docker compose` v2, `curl`, `openssl`.

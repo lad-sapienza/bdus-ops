@@ -38,8 +38,9 @@ Creates `$BDUS_ROOT/<instance>/` from the `INSTANCE_<instance>_*` keys in
 - writes `.env` (`chmod 600`): `COMPOSE_PROJECT_NAME=bdus-<instance>`,
   `COMPOSE_FILE`, `BDUS_VERSION` (`--version`, else `config.env` `BDUS_VERSION`),
   `BDUS_PORT`, `BRADYPUS_ALLOW_NEW_APP`, and for a Postgres instance
-  `POSTGRES_USER/DB` + a **generated** `POSTGRES_PASSWORD`; for a Martin
-  instance, `MARTIN_PORT`
+  `POSTGRES_USER/DB` + a **generated** `POSTGRES_PASSWORD` (+ `POSTGRES_PORT`
+  if `INSTANCE_<n>_POSTGRES_PORT` is set — publishes Postgres itself, with
+  TLS, see below); for a Martin instance, `MARTIN_PORT`
 - writes `bdus.override.yml` (env passthrough, `no-new-privileges`, `mem_limit`,
   the bind mounts above, and — when `INSTANCE_<n>_POSTGRES=1` — a
   `postgis/postgis:16-3.4-alpine` service instead of plain `postgres`; any
@@ -52,20 +53,23 @@ Creates `$BDUS_ROOT/<instance>/` from the `INSTANCE_<instance>_*` keys in
   includes a permanent no-op bootstrap function (`bdus init` creates it in the
   shared `postgres` maintenance database) that keeps it running before any app
   opts in. See "Vector tiles (Martin)" below
-- `docker compose pull && up -d` (postgres first, then the bootstrap function,
-  then everything else, when Martin is enabled — otherwise martin's first boot
-  can race the function's creation), restarts `bdus-fw` (needs sudo; warns
-  otherwise), waits up to 90 s for health
+- `docker compose pull && up -d` (postgres first, then — when
+  `INSTANCE_<n>_POSTGRES_PORT` is set — a self-signed TLS cert for it, then
+  the Martin bootstrap function, then everything else, when Martin is
+  enabled — otherwise martin's first boot can race the function's creation),
+  restarts `bdus-fw` (needs sudo; warns otherwise), waits up to 90 s for
+  health
 
 `.env` is written **once**. Re-running refreshes `bradypus.yml` and
 `bdus.override.yml` but keeps `.env` (holds the generated password) unless
 `--force` — **never use `--force` just to pick up a bind-mount/Martin change
 on an existing instance**, it rotates `POSTGRES_PASSWORD` while the database
-itself still has the old one. The one exception: flipping `MARTIN=1` on an
-instance that already has an `.env` appends `MARTIN_PORT` to it (only if
-missing) without touching anything else, so plain `bdus init <instance>`
-(no `--force`) is always the right call for enabling a new flag on an
-existing instance.
+itself still has the old one. The one exception: flipping `MARTIN=1` or
+setting `POSTGRES_PORT` on an instance that already has an `.env` appends
+the corresponding `MARTIN_PORT`/`POSTGRES_PORT` line to it (only if missing)
+without touching anything else, so plain `bdus init <instance>` (no
+`--force`) is always the right call for enabling a new flag on an existing
+instance.
 
 ### Vector tiles (Martin)
 
@@ -75,16 +79,46 @@ project — not a feature of the app itself. Martin has no built-in
 authentication; exposure is the published port filtered by the same
 `bdus-fw` IP allowlist as `BDUS_PORT`, not a reverse-proxy change.
 
-Attaching an app is manual (same philosophy as the QGIS-read-only-Postgres
-idea it grew out of — no bdus-ops automation): create a `gis` schema in that
-app's own database, a `<app>_gis` role (read-write, for QGIS) and a
-`<app>_martin` role (read-only, `GRANT SELECT ON ALL TABLES IN SCHEMA gis`),
-then add one more `postgres:` entry to `martin-config.yaml` scoped to
-`<app>_martin` with `auto_publish.from_schemas: [gis]`. Martin re-reads its
-config on its own (`reload_interval`, 10 min default) — no restart required.
-Style/sprite/font files go in `gis-data/<app>/styles/` etc. via plain
-`rsync`/`scp` — no dedicated command. Full walkthrough: `DEPLOY-RUNBOOK.md`
-§18.
+Attaching an app is managed (`bdus app gis <instance> <app> [--write]` — see
+above), not hand-typed SQL: it provisions the `gis` schema and the
+`<app>_martin`/`<app>_gis` roles. The one step that stays manual is wiring
+the actual tile source: add a `postgres:` entry to `martin-config.yaml`
+scoped to `<app>_martin` with `auto_publish.from_schemas: [gis]`. Martin
+re-reads its config on its own (`reload_interval`, 10 min default) — no
+restart required. Style/sprite/font files go in `gis-data/<app>/styles/`
+etc. via plain `rsync`/`scp` — no dedicated command. Full walkthrough:
+`DEPLOY-RUNBOOK.md` §18.
+
+`<app>_martin` only needs to be reachable *from Martin* (same compose
+network — no external exposure needed). `<app>_gis`, meant for QGIS Desktop
+connecting directly over the Postgres wire protocol, needs Postgres itself
+published: set `INSTANCE_<n>_POSTGRES_PORT` (same IP-allowlisted-by-`bdus-fw`
+model as `MARTIN_PORT`/`BDUS_PORT` — see the config keys table below).
+Without it, the `<app>_gis` role exists but nothing outside the compose
+network can reach it.
+
+### TLS on the published Postgres port
+
+Setting `INSTANCE_<n>_POSTGRES_PORT` also enables TLS on Postgres itself —
+unconditionally, no separate flag: publishing Postgres externally implies
+wanting it encrypted. `bdus init` generates a self-signed cert once (`openssl`
+run inside the `postgres` container itself, since `initdb` refuses to start
+against a non-empty `PGDATA`, ruling out placing it there before first boot),
+stores it at `data/pgdata/tls/` (rides along with the rest of the cluster's
+data — same bind mount, same backups), and sets `ssl_cert_file`/`ssl_key_file`
+in the postgres service's `command:`. This needs a container restart to take
+effect (SSL settings aren't reloadable) — `bdus init` handles that, including
+the first time you flip `POSTGRES_PORT` on for an instance that already has
+data. Re-running `bdus init` afterwards is a no-op: the cert isn't
+regenerated and the container isn't recreated once TLS is already active.
+
+Client-side, add `sslmode=require` to the connection string (QGIS: "SSL mode"
+→ "require" in the connection settings) — that's enough to get an encrypted
+channel with the self-signed cert, no need to distribute it to clients.
+**Not in scope**: this doesn't touch `pg_hba.conf` to *require* TLS
+server-side — a client connecting without `sslmode=require` still gets a
+plaintext connection today. Enforcing that (a custom `pg_hba.conf` with
+`hostssl` rules) is a real follow-up, not implemented here.
 
 Keeping `gis` (not the app's own tables) in the same database as BraDypUS's
 data — rather than a separate database — is deliberate: schema-level `GRANT`s
@@ -370,3 +404,4 @@ warnings otherwise.
 | `INSTANCE_<n>_MEM_API` / `_MEM_FRONT` | container memory limits |
 | `INSTANCE_<n>_MARTIN` | `1` adds a Martin (vector tile) service — requires `POSTGRES=1` |
 | `INSTANCE_<n>_MARTIN_PORT` | `<ip>:<port>` bind for Martin (only used when `MARTIN=1`) |
+| `INSTANCE_<n>_POSTGRES_PORT` | optional `<ip>:<port>` to publish Postgres itself, with TLS (e.g. for QGIS via `<app>_gis` — requires `POSTGRES=1`); empty (default) keeps it internal-only — see "TLS on the published Postgres port" above |
