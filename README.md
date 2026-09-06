@@ -511,10 +511,18 @@ Checks invariants and exits non-zero on failure: docker enabled + `live-restore`
 `ufw` active, `bdus-fw.sh` + `bdus-fw.service` present/enabled, `DOCKER-USER`
 DROP rules present, backup cron installed, rsync target reachable; per instance:
 dir + `.env` (perms `600`) + `bdus.override.yml`, compose config valid, `api`
-running, `data/projects/` present, Postgres healthy + `data/pgdata/` owned by
-uid 70 (if enabled), `gis-data/` present + Martin healthy (if enabled). Some
-host checks need passwordless `sudo` for `iptables`/`ufw`; they degrade to
-warnings otherwise.
+running, `data/projects/` present, Postgres accepting connections **and**
+its data actually readable (if enabled), `gis-data/` present + Martin healthy
+(if enabled). Some host checks need passwordless `sudo` for `iptables`/`ufw`;
+they degrade to warnings otherwise.
+
+Postgres gets two separate checks, not one: `pg_isready` only confirms the
+postmaster is listening, it never opens a real session — a bind-mounted
+`data/pgdata` can have its top-level directory correctly owned while a file
+nested inside it isn't (this happened in production: `global/pg_filenode.map`
+alone had the wrong owner, `pg_isready` still reported healthy, and every
+real query failed). The second check runs an actual `SELECT 1`, which needs
+to open that same catalog file — it would have caught this immediately.
 
 ### config.env keys
 

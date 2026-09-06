@@ -32,8 +32,14 @@ for i in $INSTANCES; do
   chk  "  api container running"        "has_line \"dc '$i' ps --status running --format '{{.Service}}'\" '^api\$'"
   chk  "  data/projects present"        "[ -d '$d/data/projects' ]"
   if instance_has_pg "$i"; then
-    chk "  postgres healthy"            "dc '$i' exec -T postgres pg_isready -U \"\$(env_get '$i' POSTGRES_USER || echo bdus)\""
-    chk "  data/pgdata owned by uid 70" "[ \"\$(stat -c '%u' '$d/data/pgdata' 2>/dev/null)\" = 70 ]"
+    pguser_expr="\$(env_get '$i' POSTGRES_USER || echo bdus)"
+    chk "  postgres accepting connections" "dc '$i' exec -T postgres pg_isready -U \"$pguser_expr\""
+    # A real query, not just pg_isready (which only checks the postmaster is
+    # listening, never opens a session): catches wrong ownership/permissions
+    # on data files that pg_isready alone would miss — e.g. a bind-mounted
+    # data/pgdata whose top-level directory is owned by uid 70 but a file
+    # nested inside it (global/pg_filenode.map, seen in production) isn't.
+    chk "  postgres data readable"        "dc '$i' exec -T postgres psql -U \"$pguser_expr\" -d postgres -tAc 'SELECT 1'"
   fi
   if instance_has_martin "$i"; then
     chk "  gis-data present"            "[ -d '$d/gis-data' ]"
