@@ -691,7 +691,13 @@ bdus app gis prod siti_scavo --write
 # senza --write: solo il ruolo di sola lettura per Martin (niente accesso QGIS)
 ```
 
-Crea/allinea (idempotente — rieseguibile, es. per aggiungere `--write` in un secondo momento senza toccare il ruolo già creato): `CREATE EXTENSION postgis` + `CREATE SCHEMA gis` sul database dell'app, il ruolo `siti_scavo_martin` (sola lettura su `gis`, mai su `public`), col `--write` anche `siti_scavo_gis` (lettura/scrittura su `gis`, per QGIS), e concede allo stesso ruolo dell'app (`siti_scavo`) lettura su `gis` per join/view con le proprie tabelle. Le password (generate, forti) finiscono in `projects/siti_scavo/gis-config.json` (chmod 600) e vengono stampate una volta — vanno lì anche se serve recuperarle più avanti. Se l'app viene esportata/importata o cancellata (`bdus app export/import/delete`), questi ruoli seguono l'app automaticamente.
+Crea/allinea (idempotente — rieseguibile, es. per aggiungere `--write` in un secondo momento senza toccare il ruolo già creato): `CREATE EXTENSION postgis` + `CREATE SCHEMA gis` sul database dell'app, il ruolo `siti_scavo_martin` (sola lettura su `gis`, mai su `public`), col `--write` anche `siti_scavo_gis` (lettura/scrittura su `gis`, per QGIS), e concede allo stesso ruolo dell'app (`siti_scavo`) lettura su `gis` per join/view con le proprie tabelle. Le password (generate, forti) finiscono in `projects/siti_scavo/gis-config.json` (chmod 600) e vengono stampate una volta — vanno lì anche se serve recuperarle più avanti:
+
+```bash
+cat /srv/bradypus/prod/data/projects/siti_scavo/gis-config.json
+```
+
+Se l'app viene esportata/importata o cancellata (`bdus app export/import/delete`), questi ruoli seguono l'app automaticamente.
 
 Poi in `/srv/bradypus/prod/martin-config.yaml`, sotto il placeholder, un'altra voce `postgres:` con solo il ruolo `_martin` (questo passo resta manuale — il file è tenuto a mano):
 

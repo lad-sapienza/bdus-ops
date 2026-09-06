@@ -203,7 +203,12 @@ touching (or rotating the password of) a role created by an earlier call.
   `projects/<app>/gis-config.json` (chmod 600) — printed once here too, same
   posture as the app's own DB password in `config.json`. Living inside
   `projects/<app>/` means it travels for free with `app export`/`import`
-  (below), since that directory is already tarred wholesale.
+  (below), since that directory is already tarred wholesale. Missed the
+  one-time printout? Read it back any time — since `data/projects` is a
+  host bind mount, a plain
+  `cat <instance-dir>/data/projects/<app>/gis-config.json` on the host works,
+  no Docker needed (or `docker compose exec api cat projects/<app>/gis-config.json`
+  from inside the instance directory, if you'd rather go through the container).
 
 This only provisions the *role* — actually serving tiles still needs a manual
 `postgres:` entry in `martin-config.yaml` (`DEPLOY-RUNBOOK.md` §18), since
