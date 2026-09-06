@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# bdus self-update
+#   git pull the bdus-ops toolbox itself (this repo) — not a BraDypUS instance,
+#   see `bdus update` for that. Fast-forward only: refuses instead of creating
+#   a surprise merge commit if local history has diverged. Safe to run before
+#   any other bdus command, any time — a no-op if already current.
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+
+case "${1:-}" in
+  -h|--help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  "") : ;;
+  *) die "usage: bdus self-update" ;;
+esac
+
+cd "$BDUS_OPS_DIR"
+git rev-parse --git-dir >/dev/null 2>&1 \
+  || die "$BDUS_OPS_DIR is not a git checkout — reinstall from https://github.com/lad-sapienza/bdus-ops"
+
+[ -z "$(git status --porcelain)" ] \
+  || die "local changes in $BDUS_OPS_DIR — commit or stash them first, then retry"
+
+info "fetching…"
+git fetch -q
+
+branch="$(git rev-parse --abbrev-ref HEAD)"
+upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)" \
+  || die "branch '$branch' has no upstream to compare against — can't self-update"
+
+behind="$(git rev-list --count "HEAD..$upstream")"
+if [ "$behind" -eq 0 ]; then
+  ok "already up to date ($branch @ $(git rev-parse --short HEAD))"
+  exit 0
+fi
+
+say "$behind new commit(s) on $upstream:"
+git --no-pager log --oneline "HEAD..$upstream" | sed 's/^/  /' >&2
+
+git merge --ff-only "$upstream" -q \
+  || die "not a fast-forward — $branch has diverged from $upstream, resolve by hand"
+
+ok "updated to $(git rev-parse --short HEAD) — re-run 'bdus init <instance>' if this pulled in a new feature"

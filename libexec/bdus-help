@@ -5,6 +5,9 @@ bdus — deployment toolbox for this BraDypUS install
 
   bdus <command> [instance|all] [args]
 
+  self-update             git pull this toolbox itself (fast-forward only) — safe to run
+                          before anything else, any time; no-op if already current
+
 Setup (one-time, needs sudo)
   setup host              host prep: docker group, daemon.json, ufw, DOCKER-USER
                           firewall + systemd unit, /srv/bradypus, unattended-upgrades
