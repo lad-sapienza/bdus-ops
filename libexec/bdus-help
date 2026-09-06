@@ -38,11 +38,11 @@ Applications
 Vector tiles (optional, per instance)
   INSTANCE_<n>_MARTIN=1 in config.env (+ _MARTIN_PORT) adds a Martin service for
   serving tiles from geodata kept outside BraDypUS (e.g. QGIS) — see `app gis` above
-  to attach an app to it, and DEPLOY-RUNBOOK.md §18 for the rest.
+  to attach an app to it, and README.md ("Vector tiles (Martin)") for the rest.
 
 Diagnostics
   doctor                  check the deploy invariants (.env perms, override, firewall rules,
                           bradypus-fw.service, cron, rsync target)
 
-Config: config.env (copy from config.env.example). Runbook: DEPLOY-RUNBOOK.md.
+Config: config.env (copy from config.env.example). Docs: README.md.
 EOF

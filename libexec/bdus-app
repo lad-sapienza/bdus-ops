@@ -19,8 +19,9 @@
 #          generated (openssl rand -hex 24) and stored in
 #          projects/<app>/gis-config.json (chmod 600) — printed once here too.
 #          This only provisions the role; wiring it into martin-config.yaml so
-#          Martin actually serves tiles is still a manual edit (DEPLOY-RUNBOOK.md
-#          §18) — not automated, since it's a hand-maintained file.
+#          Martin actually serves tiles is still a manual edit (README.md,
+#          "Vector tiles (Martin)") — not automated, since it's a
+#          hand-maintained file.
 # to-pgsql — converts a live sqlite app to pgsql in place (same name, same
 #          URL): renames projects/<app> aside, builds a fresh pgsql app under
 #          the same name for its native schema (bdus app add's own DDL —
@@ -167,7 +168,7 @@ gis_enable() {   # gis_enable <instance> <app> <want_write:0|1>
       -c "GRANT ALL ON ALL SEQUENCES IN SCHEMA gis TO \"$gis_user\""
   fi
 
-  info "  to actually serve tiles, add a postgres: entry to martin-config.yaml — DEPLOY-RUNBOOK.md §18"
+  info "  to actually serve tiles, add a postgres: entry to martin-config.yaml — see README.md"
 }
 
 case "$action" in

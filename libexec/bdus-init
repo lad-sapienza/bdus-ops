@@ -134,7 +134,7 @@ else
 fi
 
 # ── martin-config.yaml (scaffold once; per-app sources are added by hand,
-#    see DEPLOY-RUNBOOK.md "Martin / vector tiles") ──────────────────────────
+#    see README.md "Vector tiles (Martin)") ──────────────────────────────────
 # Martin refuses to start at all with zero configured tile sources ("No tile
 # sources found", fatal — verified against a real run). The bootstrap
 # function below is a permanent, harmless placeholder (always returns a NULL
@@ -165,7 +165,7 @@ if [ "$martin" = 1 ] && [ ! -f "$d/martin-config.yaml" ]; then
 #   - /gis-data/<app>/styles
 #
 # Martin re-reads this file on its own (reload_interval, default 10 min) —
-# no restart needed after adding an app. See DEPLOY-RUNBOOK.md.
+# no restart needed after adding an app. See README.md.
 postgres:
   - connection_string: postgres://${POSTGRES_USER:-bdus}:${POSTGRES_PASSWORD}@postgres:5432/postgres
     functions:
