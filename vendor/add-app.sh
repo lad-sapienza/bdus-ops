@@ -90,11 +90,30 @@ fi
 [ -n "$ADMIN_PW" ] || die "empty admin password"
 
 cd "$INSTDIR"
-# shellcheck disable=SC1091
-. ./.env
+
+# Pull the two values we need as shell variables WITHOUT sourcing the file.
+# <instance>/.env is a docker-compose env file (plain KEY=VALUE, no shell
+# quoting rules, and in practice it sometimes carries hand-added notes) — not
+# a shell script. `. ./.env` executes every line, so a stray "Database: ..."
+# note or an unquoted value with spaces aborts this script. `docker compose`
+# below still reads ./.env itself (cwd auto-load) for COMPOSE_*/POSTGRES_*.
+env_file_get() {   # env_file_get KEY  → first uncommented KEY= value, unquoted
+  awk -F= -v k="$1" '
+    /^[[:space:]]*#/ { next }
+    $1 == k {
+      sub(/^[^=]*=/, ""); sub(/\r$/, "")
+      q = substr($0, 1, 1)
+      if ((q == "\"" || q == "\047") && substr($0, length($0), 1) == q)
+        $0 = substr($0, 2, length($0) - 2)
+      print; exit
+    }
+  ' ./.env
+}
 
 DB_PASS=""
 if [ "$ENGINE" = pgsql ]; then
+  POSTGRES_USER="$(env_file_get POSTGRES_USER)"
+  POSTGRES_PASSWORD="$(env_file_get POSTGRES_PASSWORD)"
   : "${POSTGRES_USER:?POSTGRES_USER not set in $INSTDIR/.env}"
   : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD not set in $INSTDIR/.env}"
 
