@@ -169,8 +169,13 @@ if systemctl list-unit-files --no-legend 2>/dev/null | grep -q '^bradypus-fw\.se
 fi
 
 # ── instances root ─────────────────────────────────────────────────────────
+# Own the top directory only — NOT -R. `bdus init` (run as this user) creates
+# everything under it as this user already, and the per-instance data dirs are
+# then owned by their container users (Postgres uid 70, api www-data). A
+# recursive chown here re-runs on every `bdus setup host` and would corrupt a
+# live data/pgdata's ownership.
 mkdir -p "$ROOT"
-[ -n "$USR" ] && chown -R "$USR:$USR" "$ROOT"
+[ -n "$USR" ] && chown "$USR:$USR" "$ROOT"
 chmod 750 "$ROOT"
 grn "$ROOT ready"
 
