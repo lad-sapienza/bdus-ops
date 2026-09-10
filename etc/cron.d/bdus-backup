@@ -7,6 +7,10 @@
 # dirs are reachable. `bdus backup all` snapshots every instance into its restic
 # repo under <instance>/backups/repo/ (a cold, off-box copy of <instance>/backups/
 # is a separate concern — pull it over SSH after this run).
+#
+# That user can't create /var/log/bdus-backup.log, and cron's shell won't run
+# the command if the redirect can't open. `bdus setup host` pre-creates it;
+# otherwise:  sudo install -o debian -g debian -m 0644 /dev/null /var/log/bdus-backup.log
 
 SHELL=/bin/bash
 15 2 * * *  debian  /usr/local/bin/bdus backup all  >> /var/log/bdus-backup.log 2>&1

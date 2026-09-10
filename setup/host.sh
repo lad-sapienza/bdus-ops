@@ -90,6 +90,16 @@ else
   fi
 fi
 
+# ── backup cron log ──────────────────────────────────────────────────────
+# etc/cron.d/bdus-backup runs `bdus backup all` as the deploy user and appends
+# to /var/log/bdus-backup.log — but that user cannot create a file in /var/log,
+# and a redirect that can't open makes cron's shell exit before the command
+# runs. Pre-create it (idempotent: left alone if it already exists).
+if [ -n "$USR" ] && [ ! -e /var/log/bdus-backup.log ]; then
+  install -o "$USR" -g "$USR" -m 0644 /dev/null /var/log/bdus-backup.log
+  grn "/var/log/bdus-backup.log ready (owner $USR)"
+fi
+
 # ── ufw: host services (does NOT cover Docker-published ports) ─────────────
 if [ "$DO_UFW" -eq 1 ]; then
   command -v ufw >/dev/null || { apt-get update -qq && apt-get install -y -qq ufw; }
