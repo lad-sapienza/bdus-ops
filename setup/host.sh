@@ -47,27 +47,47 @@ else
   grn "daemon.json already current"
 fi
 
-# ── backup tooling: jq (apt) + restic (pinned binary) ────────────────────
-# `bdus backup` needs both. Debian's own restic is too old for
-# `--stdin-from-command` (needs >= 0.17), so pin a release binary.
+# ── backup tooling: jq + restic (>= 0.17, for `restic backup --stdin-from-command`)
+# `bdus backup` needs both. Prefer the distro packages; fall back to a pinned
+# restic release binary only when the packaged one is missing or too old. A
+# failure here must NOT abort the rest of host prep — `bdus doctor` / `bdus
+# backup` flag a missing restic loudly anyway.
 command -v jq >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq jq; }
 grn "jq present"
 
-RESTIC_VER=0.17.3
-if command -v restic >/dev/null 2>&1 && [ "$(restic version 2>/dev/null | awk '{print $2}')" = "$RESTIC_VER" ]; then
-  grn "restic ${RESTIC_VER} present"
+_restic_ok() {   # 0 if `restic` on PATH is >= 0.17
+  local v maj min
+  v="$(restic version 2>/dev/null | awk '{print $2}')" || return 1
+  [ -n "$v" ] || return 1
+  IFS=. read -r maj min _ <<<"$v"
+  [ "${maj:-0}" -gt 0 ] || { [ "${maj:-0}" -eq 0 ] && [ "${min:-0}" -ge 17 ]; }
+}
+
+RESTIC_VER=0.17.3   # pinned fallback only
+if _restic_ok; then
+  grn "restic $(restic version | awk '{print $2}') present"
 else
-  t="$(mktemp -d)"; f="restic_${RESTIC_VER}_linux_amd64.bz2"
-  # pinned version over HTTPS from the project's own releases — same trust model
-  # as the bradypus.yml fetch in `bdus init`. Optional integrity check against
-  # the release's own checksums:
-  #   curl -fsSL "https://github.com/restic/restic/releases/download/v${RESTIC_VER}/SHA256SUMS" \
-  #     | ( cd "$t" && grep " $f\$" | sha256sum -c - )
-  curl -fsSL -o "$t/$f" "https://github.com/restic/restic/releases/download/v${RESTIC_VER}/$f"
-  bunzip2 "$t/$f"
-  install -m 0755 "$t/restic_${RESTIC_VER}_linux_amd64" /usr/local/bin/restic
-  rm -rf "$t"
-  grn "restic ${RESTIC_VER} installed"
+  apt-get install -y -qq restic >/dev/null 2>&1 || true
+  if _restic_ok; then
+    grn "restic $(restic version | awk '{print $2}') from apt"
+  else
+    inf "apt restic missing/old — fetching pinned v${RESTIC_VER} binary"
+    command -v bunzip2 >/dev/null 2>&1 || apt-get install -y -qq bzip2 || true
+    t="$(mktemp -d)"; f="restic_${RESTIC_VER}_linux_amd64.bz2"
+    # pinned version over HTTPS from the project's own releases — same trust
+    # model as the bradypus.yml fetch in `bdus init`. Optional integrity check:
+    #   curl -fsSL "https://github.com/restic/restic/releases/download/v${RESTIC_VER}/SHA256SUMS" \
+    #     | ( cd "$t" && grep " $f\$" | sha256sum -c - )
+    if command -v bunzip2 >/dev/null 2>&1 \
+       && curl -fsSL -o "$t/$f" "https://github.com/restic/restic/releases/download/v${RESTIC_VER}/$f" \
+       && bunzip2 "$t/$f"; then
+      install -m 0755 "$t/restic_${RESTIC_VER}_linux_amd64" /usr/local/bin/restic
+      grn "restic ${RESTIC_VER} installed"
+    else
+      inf "could not install restic — run 'apt-get install restic' or drop a binary in /usr/local/bin, then re-run"
+    fi
+    rm -rf "$t"
+  fi
 fi
 
 # ── ufw: host services (does NOT cover Docker-published ports) ─────────────
