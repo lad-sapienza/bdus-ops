@@ -299,11 +299,17 @@ Each `bdus backup` run, **under one `flock`** on `<instance>/backups/.lock`
 | kind | source | how |
 |------|--------|-----|
 | `pgall` | every database + roles | `pg_dumpall` streamed in (`--stdin-from-command`) |
-| `files` | `data/projects/` | `docker-backup.sh` streamed in |
+| `files` | `data/projects/` | plain `tar cf -` streamed in |
 | `env`   | `<instance>/.env` | streamed in — **includes `POSTGRES_PASSWORD`**, by design (self-contained restore) |
 | `gis`   | `gis-data/` (martin only) | real path, native file-level dedup |
 
-Postgres is snapshotted first so `files` is a superset of what the DB references.
+`pgall` needs Postgres up; `files` runs `tar` privileged **inside** the api
+container (`docker compose run --rm --no-deps` — so it works with the instance
+stopped, and can read `0600` `www-data` files like `.jwt_secret`). Plain `tar`,
+not gzip: restic dedups an uncompressed tar per-file, where a gzip stream would
+cascade a one-file change across half the archive. `bdus restore` extracts the
+same way and `chown -R www-data` after. Postgres is snapshotted first so `files`
+is a superset of what the DB references.
 Then `restic forget` applies `BACKUP_KEEP` per kind; `--prune` runs per
 `BACKUP_PRUNE` (`weekly`/`always`/`never`, or force with `--prune`/`--no-prune`).
 `<instance>/backups/.last-ok` is rewritten only after a fully clean run — a cold,

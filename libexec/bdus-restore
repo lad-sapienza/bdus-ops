@@ -47,9 +47,9 @@ idir="$(instance_dir "$inst")"
 [ -f "$idir/.env" ] || with_env=1     # bare-metal DR: no .env yet → it must come from the restore point
 
 # ── resolve the three input streams ───────────────────────────────────────
-# files_cmd → tar of data/projects on stdout      (always)
-# db_cmd    → pg_dumpall .sql on stdout            (empty ⇒ skip Postgres)
-# env_cmd   → <instance>/.env on stdout            (empty ⇒ nothing to lay down)
+# files_cmd → PLAIN (uncompressed) tar of data/projects on stdout   (always)
+# db_cmd    → pg_dumpall .sql on stdout                             (empty ⇒ skip Postgres)
+# env_cmd   → <instance>/.env on stdout                             (empty ⇒ nothing to lay down)
 src=""; fs=""; ps=""; es=""
 tmp=""; cleanup() { [ -n "$tmp" ] && rm -rf "$tmp"; }; trap cleanup EXIT
 db_cmd=(); env_cmd=()
@@ -110,7 +110,10 @@ if [ ${#db_cmd[@]} -gt 0 ]; then
 fi
 
 info "restoring data/projects…"
-"${files_cmd[@]}" | dc "$inst" run --rm --no-deps -T --entrypoint /usr/local/bin/docker-restore.sh api
+# extract in place (files not in the archive are left alone), then fix ownership —
+# runs privileged inside the api container, works with the instance stopped.
+"${files_cmd[@]}" | dc "$inst" run --rm --no-deps -T --entrypoint sh api \
+  -c 'tar xf - -C /var/www/html/projects && chown -R www-data:www-data /var/www/html/projects'
 ok "data/projects restored"
 
 if [ "$with_env" -eq 1 ] && [ ${#env_cmd[@]} -gt 0 ]; then

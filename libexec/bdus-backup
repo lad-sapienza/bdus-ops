@@ -62,15 +62,19 @@ restic_backup_one() {   # $1 instance  $2 reason  $3 prune-mode: auto|always|nev
     fi
   fi
 
-  # 2 — data/projects, straight from docker-backup.sh (its sqlite/permission handling,
-  #     and symmetry with docker-restore.sh, are why this goes through the container).
+  # 2 — data/projects: a plain `tar cf -`, run privileged INSIDE the api container
+  #     (files like .jwt_secret are 0600 www-data, unreadable to the deploy user)
+  #     via `run --rm` so it works with the instance stopped too. No gzip — restic
+  #     dedups a plain tar per-file; a gzip stream cascades a 1-file change across
+  #     half the archive. /var/www/html/projects must match the api image docroot
+  #     (bdus.override.yml bind-mounts ./data/projects there).
   if rst "$i" backup --host "$proj" --tag "$tags,kind:files" \
        --stdin-from-command --stdin-filename files.tar \
-       -- bash -c 'cd "$1" && exec docker compose exec -T api /usr/local/bin/docker-backup.sh' _ "$d" \
+       -- bash -c 'cd "$1" && exec docker compose run --rm --no-deps -T --entrypoint sh api -c "cd /var/www/html/projects && exec tar cf - ."' _ "$d" \
        >/dev/null; then
     ok "  files  $(_id "$i" files)"
   else
-    bad "  data/projects snapshot failed (is '$i' up?)"; errs=1
+    bad "  data/projects snapshot failed"; errs=1
   fi
 
   # 3 — <instance>/.env  (self-contained DR — passwords included, by design).
