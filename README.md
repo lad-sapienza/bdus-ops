@@ -63,6 +63,140 @@ Full flag reference: "Command reference" below.
 
 ---
 
+## Walkthrough
+
+Every flow end to end. `bdus` is on `PATH` and `config.env` is set ("Install"
+above); each step links to its full entry under "Command reference" below.
+
+### Stand up a host from nothing
+
+```bash
+bdus setup host                 # sudo: docker, ufw, DOCKER-USER firewall, restic + jq, /srv/bradypus
+#   ↳ log out / back in once (docker group), then:
+bdus init prod                  # bradypus.yml + .env + bdus.override.yml, pull, up, wait healthy,
+bdus init demo                  #   and create <instance>/backups/repo/ (restic)
+bdus doctor                     # every invariant green before going further
+```
+
+`bdus setup host` is idempotent — safe to re-run for a new dependency; it owns
+`$BDUS_ROOT` non-recursively, so it never touches a live `data/pgdata`.
+
+### Create apps
+
+```bash
+bdus app add demo --name bdus_demo  --engine sqlite --email admin@example.org
+bdus app add prod --name siti_scavo --engine pgsql  --email admin@example.org
+bdus app add prod --name survey     --engine pgsql  --email admin@example.org --gis-write
+```
+
+`pgsql` gets an isolated role + database (password printed once, stored in
+`projects/<app>/config.json`). `--gis-write` also provisions PostGIS + the
+Martin/QGIS roles.
+
+### Turn on scheduled backups
+
+```bash
+sudo cp etc/cron.d/bdus-backup /etc/cron.d/bdus-backup   # edit the user/path first
+```
+
+Nightly `bdus backup all` at 02:15 (`bdus setup host` already created
+`/var/log/bdus-backup.log` for the cron user). Uncomment the weekly
+`bdus backup verify all` line in the file if you want it.
+
+### Back up now, and see what you have
+
+```bash
+bdus backup all                 # one restic snapshot per kind (files, pgall, env, gis) per instance
+bdus backup list prod           # the restore points — each block is a run:<ts>
+bdus backup verify all          # restic check --read-data-subset=5%, recorded for `bdus status`
+bdus status                     # newest snapshot age, last verify, repo size vs restore size
+```
+
+The second and later runs only store what changed — 27 retained restore points
+cost roughly one full copy plus the daily deltas.
+
+### Update to a new release
+
+```bash
+bdus update all 5.4.9           # verifies the tag on GHCR, backs up each instance first
+                                #   (tagged reason:pre-update_<from>-to-<to>), bumps the pin,
+                                #   pull + up -d, polls health, reverts the pin on failure
+```
+
+The pin reverts on failure but the DB does not (migrations may have run) — roll
+back with:
+
+```bash
+bdus backup list prod
+bdus restore prod --at <the pre-update run> --yes
+```
+
+### Restore
+
+```bash
+# undo the last day on a live instance
+bdus restore prod --at latest
+
+# go back to a specific point (a run:<ts>, or any snapshot short-id from that run)
+bdus backup list prod
+bdus restore prod --at 20260910T021503
+
+# from a portable bundle — offline, hand-off, or a box that can't reach the repo
+bdus backup bundle prod --at latest      # → prod/backups/bundles/<project>-<ts>.bdusinstance.tgz
+scp .../<project>-<ts>.bdusinstance.tgz other-host:/tmp/
+bdus restore prod --bundle /tmp/<project>-<ts>.bdusinstance.tgz --yes
+```
+
+`.env` is left alone by default (an old one is a version/port rollback); add
+`--with-env` to lay it down too.
+
+### Disaster recovery — whole instance, fresh host
+
+```bash
+bdus setup host
+bdus init prod                           # recreates .env, starts the stack, makes the repo
+bdus restore prod --at latest --with-env # or:  --bundle <file>  from an off-box copy
+#   --with-env is implied here (fresh instance, no .env yet) — review BDUS_VERSION / ports after
+```
+
+If the restic repo itself is what you lost, restore from a `bdus backup bundle`
+kept off-box, or from a cold SSH copy of `<instance>/backups/`.
+
+### Move or clone a single app
+
+```bash
+bdus app export prod siti_scavo          # → prod/exports/siti_scavo-prod-<ts>.bdusapp.tgz
+                                         #   (one tar.gz: the tree + its pg dump if pgsql)
+
+bdus app import prod siti_scavo-prod-<ts>.bdusapp.tgz --force      # over itself
+bdus app import demo siti_scavo-prod-<ts>.bdusapp.tgz --new-jwt    # clone to another instance/site
+```
+
+### Bring a plain app folder in from a laptop
+
+```bash
+# laptop — no config.env, no instance, no Docker: just tar. sqlite only.
+bdus app pack ~/dl/old_dig --name old_dig      # → ./old_dig-pack-<ts>.bdusapp.tgz
+scp old_dig-pack-*.bdusapp.tgz prod-host:/tmp/
+ssh prod-host 'bdus app import prod /tmp/old_dig-pack-*.bdusapp.tgz'
+```
+
+### Convert an app from sqlite to pgsql
+
+```bash
+bdus app to-pgsql prod old_dig           # same name, same URL; exports a safety copy first,
+                                         #   keeps projects/old_dig-sqlite/ as a rollback
+```
+
+### Retire an app
+
+```bash
+bdus app delete prod old_dig             # exports to prod/exports/ first, then rm -rf +
+                                         #   (pgsql) DROP DATABASE/ROLE; asks you to type the name
+```
+
+---
+
 ## Command reference
 
 `bdus <command> [instance|all] [args]`. Every subcommand also prints `--help`.
