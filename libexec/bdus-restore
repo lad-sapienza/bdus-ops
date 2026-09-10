@@ -57,11 +57,11 @@ db_cmd=(); env_cmd=()
 if [ -n "$bundle" ]; then
   [ -f "$bundle" ] || die "not found: $bundle"
   tmp="$(mktemp -d)"; tar xzf "$bundle" -C "$tmp"
-  [ -f "$tmp/files.tar.gz" ] || die "bundle has no files.tar.gz"
+  [ -f "$tmp/files.tar" ] || die "not a bdusinstance bundle (no files.tar)"
   src="bundle $bundle"
-  files_cmd=(gzip -dc "$tmp/files.tar.gz")
-  [ -f "$tmp/pgall.sql.gz" ] && db_cmd=(gzip -dc "$tmp/pgall.sql.gz")
-  [ -f "$tmp/env" ]          && env_cmd=(cat "$tmp/env")
+  files_cmd=(cat "$tmp/files.tar")
+  [ -f "$tmp/pgall.sql" ] && db_cmd=(cat "$tmp/pgall.sql")
+  [ -f "$tmp/env" ]       && env_cmd=(cat "$tmp/env")
 
 elif [ -n "$filesf" ]; then
   [ -f "$filesf" ] || die "not found: $filesf"

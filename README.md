@@ -318,10 +318,10 @@ to know it copied a consistent state.
 
 - `bdus backup list <instance>` — the restore points (a `restic snapshots`),
   grouped by kind, `run:<ts>` shown
-- `bdus backup bundle <instance> [--at <id|run|latest>] [--out F]` — reconstruct
-  a portable `<project>-<ts>.bdusinstance.tgz` (`manifest` + `files.tar.gz` +
-  `pgall.sql.gz` + `env`) from a chosen point — the offline / hand-off / "freeze
-  this milestone outside the retention policy" artifact
+- `bdus backup bundle <instance> [--at <id|run|latest>] [--out F]` — one `tar.gz`
+  (`files.tar` + `pgall.sql` + `env` + a plain-text `ORIGIN`) rebuilt from a
+  chosen restore point — the offline / hand-off / "freeze this milestone outside
+  the retention policy" artifact. `bdus restore --bundle` consumes it.
 - `bdus backup verify [instance|all]` — `restic check --read-data-subset=5%`,
   records the date for `bdus status` (`BACKUP_VERIFY_DAYS`)
 - `bdus backup prune [instance|all]` — `forget --prune` now, under the lock

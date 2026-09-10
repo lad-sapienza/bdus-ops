@@ -206,15 +206,18 @@ bundle)
     out="$(backup_dir "$inst")/bundles/${proj}-${ts}.bdusinstance.tgz"
   fi
 
+  # restic dump gives plain streams; write them as-is and let ONE tar czf
+  # compress the lot (plain tar + plain SQL squeeze far better in a single pass
+  # than re-gzipping already-gzipped members). ORIGIN is a human breadcrumb —
+  # bdus restore --bundle does not parse it.
   tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-  rst "$inst" dump "$fs" /files.tar | gzip > "$tmp/files.tar.gz"
-  if [ -n "$ps" ]; then rst "$inst" dump "$ps" /pgall.sql | gzip > "$tmp/pgall.sql.gz"; fi
-  if [ -n "$es" ]; then rst "$inst" dump "$es" /env > "$tmp/env"; fi
+  rst "$inst" dump "$fs" /files.tar > "$tmp/files.tar"
+  if [ -n "$ps" ]; then rst "$inst" dump "$ps" /pgall.sql > "$tmp/pgall.sql"; fi
+  if [ -n "$es" ]; then rst "$inst" dump "$es" /env      > "$tmp/env"; fi
   {
-    printf 'instance=%s\nproject=%s\n' "$inst" "$proj"
-    printf 'files_snap=%s\npgall_snap=%s\nenv_snap=%s\n' "$fs" "${ps:-}" "${es:-}"
-    printf 'at=%s\ncreated=%s\n' "$at" "$ts"
-  } > "$tmp/manifest"
+    printf 'instance=%s\nat=%s\ncreated=%s\n' "$inst" "$at" "$(date -Iseconds)"
+    printf 'snapshots=files:%s pgall:%s env:%s\n' "$fs" "${ps:-–}" "${es:-–}"
+  } > "$tmp/ORIGIN"
   tar czf "$out" -C "$tmp" .
   ok "bundle → $out  ($(du -h "$out" | cut -f1))"
   ;;
