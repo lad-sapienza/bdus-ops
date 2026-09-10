@@ -33,24 +33,22 @@
 #          bdus_queries — saved SQL that may not be Postgres-portable) are
 #          excluded, not migrated. Exports a safety copy first, asks you to
 #          type the app name; the renamed sqlite copy is kept, not deleted.
-# export — one portable archive of a single app: projects/<app>/ tree + (pgsql)
-#          a pg_dump of its database + a manifest. Lands in <instance>/exports/.
-#          gis-config.json (if any) travels for free — it lives inside
-#          projects/<app>/, which is tarred wholesale.
+# export — one portable archive of a single app, into <instance>/exports/:
+#          a single tar.gz with the projects/<app>/ tree at the top and, for a
+#          pgsql app, a `db.dump` (pg_dump -Fc) beside it. No manifest — the
+#          engine is read from the tree's own config.json on import.
+#          gis-config.json travels for free (it lives inside projects/<app>/).
 # pack   — dev-machine counterpart of `export` for an app you hold only as a
 #          plain directory (a v4 app pulled off the old server, migrated
 #          locally): no config.env, no running instance, no Docker — just
-#          `tar`. Wraps <dir>/ into the same *.bdusapp.tgz `export` writes
-#          (`manifest` + `files.tar.gz`, the tree with its single top-level
-#          entry set to --name; no `db.dump`). sqlite only — a pgsql app's
-#          data lives outside the folder, so `export` it from a live instance.
-#          `bdus app import` ingests the result unchanged, writing it through
-#          the api container so the restored tree ends up owned correctly no
-#          matter who packed it.
-# import — the reverse: extracts the tree, and for pgsql recreates the role and
-#          database from the credentials in the app's own config.json (and any
-#          gis/martin roles from gis-config.json) before pg_restore, then loads
-#          the dump. No container restart. Works into a different instance.
+#          `tar`. Writes the same shape as `export`: one tar.gz whose single
+#          top-level entry is <name>. sqlite only — a pgsql app's data lives
+#          outside the folder, so `export` it from a live instance.
+# import — the reverse: pushes the <app>/ tree in through the api container
+#          (correct ownership), reads the engine from the restored config.json,
+#          and for pgsql recreates the role + database from that config (and any
+#          gis/martin roles from gis-config.json) before pg_restore of db.dump.
+#          No container restart. Works into a different instance.
 # delete — rm -rf projects/<app> and, for pgsql, DROP DATABASE WITH (FORCE) +
 #          DROP ROLE (unless it is the shared POSTGRES_USER, or --keep-role) +
 #          any gis/martin roles from gis-config.json.
@@ -59,11 +57,11 @@
 set -euo pipefail
 
 # ── bdus app pack ──────────────────────────────────────────────────────────
-# <dir> → the same <app>.bdusapp.tgz that `bdus app export` writes, so
-# `bdus app import` on a server ingests it with no special-casing. The one
-# action meant to run on a plain dev machine: no config.env, no running
-# instance, no Docker — just `tar`. Intercepted here, before lib/common.sh,
-# which would demand all three.
+# <dir> → the same *.bdusapp.tgz that `bdus app export` writes (one tar.gz, the
+# tree at the top, no manifest), so `bdus app import` on a server ingests it
+# with no special-casing. The one action meant to run on a plain dev machine:
+# no config.env, no running instance, no Docker — just `tar`. Intercepted here,
+# before lib/common.sh, which would demand all three.
 if [ "${1:-}" = pack ]; then
   shift
   if [ -t 2 ]; then _r=$'\e[31m'; _g=$'\e[32m'; _c=$'\e[36m'; _y=$'\e[33m'; _z=$'\e[0m'
@@ -148,41 +146,24 @@ EOF
 
   pinfo "pack  $src  →  $out   (app '$name', sqlite)"
 
-  # files.tar.gz — the shape docker-restore.sh expects: one top-level entry
-  # that IS the app name (docker-backup.sh does `tar czf - <app>` from
-  # /var/www/html/projects). Stream straight from the directory when it is
-  # already named <name>; otherwise stage a copy under the new name first.
+  # One tar.gz whose single top-level entry IS the app name — exactly what
+  # `bdus app import` expects, and the same shape `bdus app export` writes.
+  # Stream straight from the directory when it is already named <name>;
+  # otherwise stage a copy under the new name first. No manifest — import
+  # reads the engine from the tree's own config.json.
   if [ "$name" = "$base" ]; then
-    tar czf "$work/files.tar.gz" "${tar_x[@]}" -C "$parent" "$base" \
-      || pdie "tar of $src failed"
+    tar czf "$out" "${tar_x[@]}" -C "$parent" "$base" || pdie "tar of $src failed"
   else
     mkdir -p "$work/stage"
     cp -a "$srcabs" "$work/stage/$name" || pdie "could not stage $src as '$name'"
-    tar czf "$work/files.tar.gz" "${tar_x[@]}" -C "$work/stage" "$name" \
-      || pdie "tar of staged '$name' failed"
+    tar czf "$out" "${tar_x[@]}" -C "$work/stage" "$name" || pdie "tar of staged '$name' failed"
   fi
 
-  tar tzf "$work/files.tar.gz" > "$work/toc" 2>/dev/null || pdie "cannot read back files.tar.gz"
+  tar tzf "$out" > "$work/toc" 2>/dev/null || pdie "cannot read back $out"
   case "$(head -1 "$work/toc")" in
     "$name"|"$name"/*) : ;;
-    *) pdie "internal: files.tar.gz top-level is '$(head -1 "$work/toc")', expected '$name/…'" ;;
+    *) pdie "internal: archive top-level is '$(head -1 "$work/toc")', expected '$name/…'" ;;
   esac
-
-  # manifest — the keys `bdus app export` writes. import reads only `app` and
-  # `engine`; for sqlite it never touches db_* or a db.dump. packed_from is
-  # extra provenance, ignored by older importers.
-  {
-    printf 'app=%s\n'            "$name"
-    printf 'engine=sqlite\n'
-    printf 'db_name=\n'
-    printf 'db_user=\n'
-    printf 'source_instance=(pack)\n'
-    printf 'bdus_version=\n'
-    printf 'exported_at=%s\n'    "$(date +%Y-%m-%dT%H:%M:%S%z)"
-    printf 'packed_from=%s\n'    "$srcabs"
-  } > "$work/manifest"
-
-  ( cd "$work" && tar czf "$out" "${tar_x[@]}" manifest files.tar.gz ) || pdie "could not assemble $out"
 
   pok "done → $out  ($(du -h "$out" | cut -f1))"
   [ "$name" = "$base" ] || pwarn "packed as '$name' (renamed from directory '$base')"
@@ -512,25 +493,21 @@ EOF
     work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
     info "export $inst/$app ($eng) → $out"
 
-    dc "$inst" exec -T api /usr/local/bin/docker-backup.sh "$app" > "$work/files.tar.gz"
-    ok "  files.tar.gz  ($(du -h "$work/files.tar.gz" | cut -f1))"
+    # the projects/<app>/ tree — a plain tar from inside the api container (root
+    # there, so 0600 files like .jwt_secret are readable), unpacked into $work/
+    dc "$inst" exec -T -e A="$app" api sh -c 'cd /var/www/html/projects && exec tar cf - "$A"' \
+      | tar xf - --no-same-owner -C "$work"
+    [ -d "$work/$app" ] || die "  tree export produced no '$app/' (is '$inst' up?)"
+    ok "  $app/ tree  ($(du -sh "$work/$app" | cut -f1))"
 
     if [ "$eng" = pgsql ]; then
       dc "$inst" exec -T postgres pg_dump -Fc -U "$(env_get "$inst" POSTGRES_USER)" -d "$dbname" > "$work/db.dump"
       ok "  db.dump  ($(du -h "$work/db.dump" | cut -f1))  [database $dbname]"
     fi
 
-    {
-      echo "app=$app"
-      echo "engine=$eng"
-      echo "db_name=$dbname"
-      echo "db_user=$dbuser"
-      echo "source_instance=$inst"
-      echo "bdus_version=$(instance_version "$inst" || true)"
-      echo "exported_at=$(date -Is)"
-    } > "$work/manifest"
-
-    ( cd "$work" && tar czf "$out" manifest files.tar.gz $( [ "$eng" = pgsql ] && echo db.dump ) )
+    # one tar.gz: <app>/ at the top, db.dump beside it (pgsql only). No manifest —
+    # import reads the engine from the tree's own config.json.
+    ( cd "$work" && tar czf "$out" "$app" $( [ "$eng" = pgsql ] && echo db.dump ) )
     ok "done → $out  ($(du -h "$out" | cut -f1))"
     ;;
 
@@ -547,27 +524,32 @@ EOF
 
     work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
     tar xzf "$file" -C "$work"
-    [ -f "$work/manifest" ] || die "not a bdusapp archive (no manifest)"
-    mkey() { sed -n "s/^$1=//p" "$work/manifest" | head -1; }
-    app="$(mkey app)"; eng="$(mkey engine)"
-    valid_app_name "$app" || die "manifest has a bad app name '$app'"
-    [ -f "$work/files.tar.gz" ] || die "archive missing files.tar.gz"
-    [ "$eng" != pgsql ] || [ -f "$work/db.dump" ] || die "pgsql archive missing db.dump"
 
-    info "import '$app' ($eng) → $inst"
+    # a bdusapp bundle is one tar.gz: exactly one top-level <app>/ directory,
+    # plus a sibling db.dump for an external-DB app. No manifest — the engine
+    # comes from the tree's own config.json once it is in place.
+    app=""
+    for d in "$work"/*/; do
+      [ -d "$d" ] || continue
+      [ -z "$app" ] || die "archive has more than one top-level directory — not a bdusapp bundle"
+      app="$(basename "$d")"
+    done
+    [ -n "$app" ] || die "no <app>/ directory at the archive root — old-format bundle? re-export it"
+    valid_app_name "$app" || die "archive top-level '$app' is not a valid app name"
+    has_dump=0; [ -f "$work/db.dump" ] && has_dump=1
+
+    info "import '$app' → $inst"
 
     if dc "$inst" exec -T api test -d "projects/$app" 2>/dev/null; then
       [ "$force" -eq 1 ] || die "app '$app' already exists on '$inst' — pass --force to replace it"
       warn "replacing existing '$app' on '$inst'"
-      # read the OLD config before removing the tree that holds it (config.json
-      # / gis-config.json), otherwise there's nothing left to know what to drop
-      if [ "$eng" = pgsql ]; then
-        su="$(env_get "$inst" POSTGRES_USER)"
-        { read -r _e; read -r odb; read -r ousr; read -r _p; } < <(app_cfg "$inst" "$app") || true
-        { read -r omu; read -r _omp; read -r ogu; read -r _ogp; } < <(gis_cfg "$inst" "$app") || true
-      fi
+      # read the OLD app's config before removing the tree that holds it, to know
+      # which DB objects to drop — the incoming app may be a different engine.
+      { read -r oeng; read -r odb; read -r ousr; read -r _op; } < <(app_cfg "$inst" "$app") || true
+      { read -r omu; read -r _omp; read -r ogu; read -r _ogp; } < <(gis_cfg "$inst" "$app") || true
       dc "$inst" exec -T -e A="$app" api sh -c 'rm -rf "projects/$A"'
-      if [ "$eng" = pgsql ]; then
+      if [ "${oeng:-}" = pgsql ]; then
+        su="$(env_get "$inst" POSTGRES_USER)"
         [ -z "${odb:-}" ] || dc "$inst" exec -T postgres psql -U "$su" -d postgres -q \
           -c "DROP DATABASE IF EXISTS \"$odb\" WITH (FORCE)" -c "DROP ROLE IF EXISTS \"$ousr\"" || true
         for r in "${omu:-}" "${ogu:-}"; do
@@ -576,14 +558,20 @@ EOF
       fi
     fi
 
-    # 1 — the projects/<app>/ tree
-    dc "$inst" exec -T api /usr/local/bin/docker-restore.sh < "$work/files.tar.gz"
+    # 1 — the projects/<app>/ tree, pushed in through the api container (root
+    #     there → correct ownership), inlining what docker-restore.sh did
+    ( cd "$work" && tar cf - "$app" ) \
+      | dc "$inst" exec -T -e A="$app" api sh -c 'cd /var/www/html/projects && tar xf - && chown -R www-data:www-data "$A"'
     ok "  projects/$app restored"
 
-    # 2 — pgsql: recreate role + db from the just-restored config.json, then load
+    # 2 — engine from the just-restored config.json (single source of truth)
+    { read -r eng; read -r dbname; read -r dbuser; read -r dbpass; } < <(app_cfg "$inst" "$app")
+    [ -n "$eng" ] || die "restored config.json for '$app' has no db_engine"
+    if [ "$eng" = pgsql ] && [ "$has_dump" -eq 0 ]; then die "config.json says pgsql but the archive carries no db.dump"; fi
+    if [ "$eng" != pgsql ] && [ "$has_dump" -eq 1 ]; then die "archive carries a db.dump but config.json engine is '$eng'"; fi
+
     if [ "$eng" = pgsql ]; then
       su="$(env_get "$inst" POSTGRES_USER)"
-      { read -r _e; read -r dbname; read -r dbuser; read -r dbpass; } < <(app_cfg "$inst" "$app")
       [ -n "$dbname" ] && [ -n "$dbuser" ] && [ -n "$dbpass" ] || die "config.json of '$app' lacks db_name/username/password"
 
       if [ "$(dc "$inst" exec -T postgres psql -U "$su" -d postgres -tAqc "SELECT 1 FROM pg_roles WHERE rolname='$dbuser'" | tr -d '[:space:]')" != 1 ]; then

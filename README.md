@@ -481,15 +481,20 @@ from each app's `config.json`.
 ### `bdus app export <instance> <app> [--out FILE]`
 
 Bundles a single app into one portable archive (`<app>-<instance>-<ts>.bdusapp.tgz`
-in `<instance>/exports/`, or `--out`):
+in `<instance>/exports/`, or `--out`) — **one `tar.gz`**, no wrapper, no manifest:
 
-- `manifest` — `app`, `engine`, `db_name`, `db_user`, `source_instance`, `bdus_version`, `exported_at`
-- `files.tar.gz` — `projects/<app>/` from `data/projects/` (`config.json`, `.jwt_secret`, `files/`, `gis-config.json` if `bdus app gis` was ever run, and for sqlite `db/bdus.sqlite`), via `docker-backup.sh <app>`
-- `db.dump` — for pgsql, `pg_dump -Fc` of the app's database (data + users) — this already includes the `gis` schema and its data, since a `pg_dump` of a database covers every schema in it
+- `<app>/` at the archive root — the `projects/<app>/` tree (`config.json`,
+  `.jwt_secret`, `files/`, `gis-config.json` if `bdus app gis` was ever run, and
+  for sqlite `db/bdus.sqlite`). Read out of the `api` container as a plain `tar`
+  (root there, so the `0600` `.jwt_secret` comes too).
+- `db.dump` — beside it, **pgsql only**: `pg_dump -Fc` of the app's database
+  (data + users, every schema — `gis` included)
 
-An app is self-contained, so the archive is everything, GIS/Martin roles
-included. Hot export: `pg_dump` is a consistent snapshot; `files/` is captured
-as-is.
+`import` needs no manifest: the app name is the archive's single top-level
+directory, the engine is read from the restored `config.json`, and a `db.dump`
+is present iff that engine has an external database. An app is self-contained,
+so the archive is everything, GIS/Martin roles included. Hot export: `pg_dump`
+is a consistent snapshot; `files/` is captured as-is.
 
 ### `bdus app pack <dir> [--name <slug>] [--out FILE]`
 
@@ -500,19 +505,13 @@ migrated to v5 in a local instance, on its way to `prod`. Runs with no
 works on your laptop.
 
 It writes the **same** `<name>-pack-<ts>.bdusapp.tgz` layout `export` does, so
-`bdus app import` ingests it with no special case:
+`bdus app import` ingests it with no special case: one `tar.gz` whose single
+top-level entry is `--name` (default: the directory's own name). `.DS_Store` and
+macOS xattrs are dropped so GNU tar on the server extracts without warnings.
 
-- `manifest` — `app` and `engine=sqlite` (the two keys `import` reads), plus
-  empty `db_name` / `db_user` / `bdus_version`, `source_instance=(pack)` and
-  `packed_from=<abs path>` for provenance
-- `files.tar.gz` — a `tar` of `<dir>/` whose single top-level entry is `--name`
-  (default: the directory's own name), exactly the shape `docker-restore.sh`
-  expects. `.DS_Store` and macOS xattrs are dropped so GNU tar on the server
-  extracts without warnings
-- no `db.dump` — **sqlite only**. A pgsql app's data lives in Postgres, outside
-  the folder; `export` it from a live instance instead. `pack` refuses if
-  `<dir>/config.json` has a `db_engine` other than `sqlite`, or if
-  `<dir>/db/bdus.sqlite` is missing
+**sqlite only** — a pgsql app's data lives in Postgres, outside the folder;
+`export` it from a live instance instead. `pack` refuses if `<dir>/config.json`
+has a `db_engine` other than `sqlite`, or if `<dir>/db/bdus.sqlite` is missing.
 
 `--name` must be `[a-z0-9_]`; it becomes the app's directory (hence its URL) on
 the target. Packing under the folder's existing name streams straight from it;
@@ -540,9 +539,11 @@ just a directory with no instance around it.
 The reverse — into the same or a **different** instance (target `bdus_version`
 should be ≥ the source):
 
-1. extracts `projects/<app>/` via `docker-restore.sh` (files not in the archive
-   are left alone)
-2. for pgsql: reads `db_name` / `db_username` / `db_password` from the restored
+1. takes the app name from the archive's single top-level `<app>/` directory,
+   then pushes that tree into the `api` container (`tar` in, `chown -R www-data`)
+   — files not in the archive are left alone
+2. reads the engine from the restored `config.json`; for pgsql reads
+   `db_name` / `db_username` / `db_password` from the restored
    `config.json`, creates the role (`CREATE ROLE … LOGIN PASSWORD`, from that
    cleartext) and database (`OWNER`, `REVOKE CONNECT FROM PUBLIC`) if missing;
    if the restored tree has a `gis-config.json`, also recreates `<app>_martin`/
