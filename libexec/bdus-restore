@@ -1,65 +1,127 @@
 #!/usr/bin/env bash
-# bdus restore <instance> [--db FILE] [--files FILE] [--yes]
+# bdus restore <instance> [--at <id|run|latest> | --bundle FILE | --files F [--db F]] [--with-env] [--yes]
 #
-# Stops the api container, restores, starts it again.
-#   --files FILE   data/projects tar.gz   (default: newest <project>-files-*.tar.gz)
-#   --db FILE      pg_dumpall .sql.gz     (postgres instances only; default: newest)
-#   --yes          skip the confirmation prompt
+# Stops the api container, restores, starts it again. Held under the backup flock.
 #
-# Data present in the target but absent from the archive is left untouched
-# (files); the Postgres restore replays CREATE DATABASE / data as dumped.
+#   --at <id|run|latest>  restore point from <instance>/backups/repo/. `id` = any snapshot
+#                         short-id of a run, `run` = a run:<ts> tag, `latest` = newest.
+#                         Assumed (latest) when nothing else is given.
+#   --bundle FILE         a *.bdusinstance.tgz from `bdus backup bundle`
+#   --files FILE [--db F] escape hatch: restore from a loose tar.gz (+ pg_dumpall .sql.gz),
+#                         e.g. a pre-restic <project>-files-*.tar.gz still in backups/
+#   --with-env            also lay down <instance>/.env from the restore point. Off by
+#                         default (an old .env is a BDUS_VERSION/port rollback); a differing
+#                         .env is written to .env.restored for you to diff. Implied when
+#                         <instance>/.env is missing (bare-metal DR).
+#   --yes                 skip the confirmation prompt
+#
+# Files present in the target but absent from the archive are left untouched;
+# Postgres is replayed with psql -d postgres (recreates databases as dumped).
 set -euo pipefail
 . "$BDUS_OPS_DIR/lib/common.sh"
 
-inst=""; dbf=""; filesf=""; yes=0
+inst=""; dbf=""; filesf=""; at=""; bundle=""; with_env=0; yes=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --db)    dbf="${2:?}";     shift 2 ;;
-    --files) filesf="${2:?}";  shift 2 ;;
-    --yes|-y) yes=1; shift ;;
-    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    -*)      die "unknown option: $1" ;;
-    *)       [ -z "$inst" ] || die "one instance"; inst="$1"; shift ;;
+    --db)       dbf="${2:?}";     shift 2 ;;
+    --files)    filesf="${2:?}";  shift 2 ;;
+    --at)       at="${2:?}";      shift 2 ;;
+    --bundle)   bundle="${2:?}";  shift 2 ;;
+    --with-env) with_env=1; shift ;;
+    --yes|-y)   yes=1; shift ;;
+    -h|--help)  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*)         die "unknown option: $1" ;;
+    *)          [ -z "$inst" ] || die "one instance"; inst="$1"; shift ;;
   esac
 done
-[ -n "$inst" ] || die "usage: bdus restore <instance> [--db F] [--files F] [--yes]"
+[ -n "$inst" ] || die "usage: bdus restore <instance> [--at <id|run|latest>|--bundle F|--files F [--db F]] [--with-env] [--yes]"
 instance_known "$inst" || die "unknown instance '$inst'"
 
+# --at (repo) / --bundle (tgz) / --files (loose archive) are three different sources — pick one
+n=0; [ -n "$at" ] && n=$((n+1)); [ -n "$bundle" ] && n=$((n+1)); [ -n "$filesf" ] && n=$((n+1))
+[ "$n" -le 1 ] || die "pick one of --at / --bundle / --files"
+[ -z "$dbf" ] || [ -n "$filesf" ] || die "--db goes with --files"
+
 proj="$(instance_project "$inst")" || die "$inst: no .env"
-dest="$(backup_dir "$inst")"
-has_pg=0; instance_has_pg "$inst" && has_pg=1
+idir="$(instance_dir "$inst")"
+[ -f "$idir/.env" ] || with_env=1     # bare-metal DR: no .env yet → it must come from the restore point
 
-latest() { local f; f="$(ls -1t "$dest/"$1 2>/dev/null | head -1)" || true; printf '%s' "$f"; }
-[ -n "$filesf" ] || filesf="$(latest "${proj}-files-*.tar.gz")"
-[ -n "$filesf" ] || die "no files archive in $dest (pass --files)"
-[ -f "$filesf" ] || die "not found: $filesf"
+# ── resolve the three input streams ───────────────────────────────────────
+# files_cmd → tar of data/projects on stdout      (always)
+# db_cmd    → pg_dumpall .sql on stdout            (empty ⇒ skip Postgres)
+# env_cmd   → <instance>/.env on stdout            (empty ⇒ nothing to lay down)
+src=""; fs=""; ps=""; es=""
+tmp=""; cleanup() { [ -n "$tmp" ] && rm -rf "$tmp"; }; trap cleanup EXIT
+db_cmd=(); env_cmd=()
 
-if [ "$has_pg" -eq 1 ]; then
-  [ -n "$dbf" ] || dbf="$(latest "${proj}-pgall-*.sql.gz")"
-  [ -n "$dbf" ] || die "postgres instance but no pgall archive (pass --db)"
-  [ -f "$dbf" ] || die "not found: $dbf"
+if [ -n "$bundle" ]; then
+  [ -f "$bundle" ] || die "not found: $bundle"
+  tmp="$(mktemp -d)"; tar xzf "$bundle" -C "$tmp"
+  [ -f "$tmp/files.tar.gz" ] || die "bundle has no files.tar.gz"
+  src="bundle $bundle"
+  files_cmd=(gzip -dc "$tmp/files.tar.gz")
+  [ -f "$tmp/pgall.sql.gz" ] && db_cmd=(gzip -dc "$tmp/pgall.sql.gz")
+  [ -f "$tmp/env" ]          && env_cmd=(cat "$tmp/env")
+
+elif [ -n "$filesf" ]; then
+  [ -f "$filesf" ] || die "not found: $filesf"
+  src="archive $filesf"
+  files_cmd=(gzip -dc "$filesf")
+  if [ -n "$dbf" ]; then [ -f "$dbf" ] || die "not found: $dbf"; db_cmd=(gzip -dc "$dbf"); fi
+
+else
+  need restic; need jq
+  backup_repo_ready "$inst" || die "$inst: no restic repo — run: bdus backup init $inst"
+  at="${at:-latest}"
+  fs="$(snap_at "$inst" files "$at")"; [ -n "$fs" ] || die "no 'files' snapshot for --at '$at'"
+  ps="$(snap_at "$inst" pgall "$at")"
+  es="$(snap_at "$inst" env   "$at")"
+  src="repo @ $at  (files:$fs pgall:${ps:--} env:${es:--})"
+  files_cmd=(rst "$inst" dump "$fs" /files.tar)
+  [ -n "$ps" ] && db_cmd=(rst "$inst" dump "$ps" /pgall.sql)
+  [ -n "$es" ] && env_cmd=(rst "$inst" dump "$es" /env)
 fi
 
+# ── confirm ──────────────────────────────────────────────────────────────
 say ""
 warn "RESTORE $inst ($proj) — overwrites live data"
-say "  files : $filesf"
-[ "$has_pg" -eq 1 ] && say "  db    : $dbf"
+say  "  source  : $src"
+[ ${#db_cmd[@]} -gt 0 ] && say "  postgres: yes"
+if [ "$with_env" -eq 1 ]; then
+  [ ${#env_cmd[@]} -gt 0 ] && say "  .env    : RESTORE (review BDUS_VERSION / ports after)" \
+                           || warn "  .env    : requested but not present in this restore point"
+fi
 say ""
 [ "$yes" -eq 1 ] || confirm "Proceed?" || { info "aborted"; exit 0; }
+
+# ── apply ────────────────────────────────────────────────────────────────
+if backup_repo_ready "$inst"; then
+  backup_lock "$inst" wait:600 || die "backup lock busy — a backup is running"
+fi
 
 info "stopping api…"
 dc "$inst" stop api
 
-if [ "$has_pg" -eq 1 ]; then
+if [ ${#db_cmd[@]} -gt 0 ]; then
   pguser="$(env_get "$inst" POSTGRES_USER || echo bdus)"
-  info "restoring Postgres (pg_dumpall)…"
-  gunzip -c "$dbf" | dc "$inst" exec -T postgres psql -q -U "$pguser" -d postgres >/dev/null
+  info "restoring Postgres…"
+  "${db_cmd[@]}" | dc "$inst" exec -T postgres psql -q -U "$pguser" -d postgres >/dev/null
   ok "postgres restored"
 fi
 
 info "restoring data/projects…"
-dc "$inst" run --rm --no-deps -T --entrypoint /usr/local/bin/docker-restore.sh api < "$filesf"
+"${files_cmd[@]}" | dc "$inst" run --rm --no-deps -T --entrypoint /usr/local/bin/docker-restore.sh api
 ok "data/projects restored"
+
+if [ "$with_env" -eq 1 ] && [ ${#env_cmd[@]} -gt 0 ]; then
+  ( umask 077; "${env_cmd[@]}" > "$idir/.env.restored" )
+  if [ -f "$idir/.env" ] && ! cmp -s "$idir/.env" "$idir/.env.restored"; then
+    warn ".env from the restore point written to .env.restored — diff and swap by hand"
+  else
+    mv "$idir/.env.restored" "$idir/.env"
+    ok ".env restored — review BDUS_VERSION / ports before the next 'bdus start $inst'"
+  fi
+fi
 
 dc "$inst" start api
 if wait_health "$inst" 90; then ok "$inst healthy"; else warn "$inst did not pass health — check: bdus logs $inst"; fi

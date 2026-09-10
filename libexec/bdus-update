@@ -40,7 +40,8 @@ while read -r i; do
 
   if [ "$nobackup" -ne 1 ]; then
     info "backing up $i first…"
-    "$BDUS_OPS_DIR/libexec/bdus-backup" "$i" --no-rsync || die "backup of $i failed — aborting update"
+    "$BDUS_OPS_DIR/libexec/bdus-backup" "$i" --reason "pre-update ${cur}-to-${ver}" \
+      || die "backup of $i failed — aborting update"
   fi
 
   info "$i: $cur → $ver"

@@ -41,8 +41,9 @@ CONFIG_FILE="${BDUS_OPS_CONFIG:-$BDUS_OPS_DIR/config.env}"
 : "${BDUS_VERSION:=latest}"
 : "${HEALTH_PATH:=/api/new-app/status}"
 : "${STALE_BACKUP_DAYS:=2}"
-: "${BACKUP_RETENTION:=14}"
-: "${BACKUP_RSYNC_TARGET:=}"
+: "${BACKUP_KEEP:=--keep-last 3 --keep-daily 7 --keep-weekly 8 --keep-monthly 12}"
+: "${BACKUP_PRUNE:=weekly}"
+: "${BACKUP_VERIFY_DAYS:=7}"
 : "${PROXY_ALLOW_IPS:=}"
 
 need docker
@@ -111,6 +112,66 @@ instance_project() { env_get "$1" COMPOSE_PROJECT_NAME; }
 instance_version() { env_get "$1" BDUS_VERSION; }
 backup_dir()       { printf '%s/backups' "$(instance_dir "$1")"; }
 gis_data_dir()     { printf '%s/gis-data' "$(instance_dir "$1")"; }
+
+# ── backups: restic engine ──────────────────────────────────────────────────
+backup_repo()      { printf '%s/repo'          "$(backup_dir "$1")"; }
+backup_repo_key()  { printf '%s/repo.key'      "$(backup_dir "$1")"; }
+backup_lastok()    { printf '%s/.last-ok'      "$(backup_dir "$1")"; }
+backup_verified()  { printf '%s/.last-verified' "$(backup_dir "$1")"; }
+backup_repo_ready() { [ -f "$(backup_repo "$1")/config" ]; }   # 0 if `restic init` was run
+
+# restic bound to instance $1's repo; remaining args pass straight through.
+rst() {
+  local i="$1"; shift
+  need restic
+  RESTIC_REPOSITORY="$(backup_repo "$i")" \
+  RESTIC_PASSWORD_FILE="$(backup_repo_key "$i")" \
+  restic "$@"
+}
+
+restic_ok_version() {   # 0 if restic ≥ 0.17 (needs --stdin-from-command)
+  local v maj min rest
+  v="$(restic version 2>/dev/null | awk '{print $2; exit}')" || return 1
+  IFS=. read -r maj min rest <<<"${v:-0.0}"
+  [ "${maj:-0}" -gt 0 ] || { [ "${maj:-0}" -eq 0 ] && [ "${min:-0}" -ge 17 ]; }
+}
+
+# hold the per-instance backup lock on FD 9. mode: try | wait:<secs>
+# Call it PLAINLY (not in $(...) or a pipeline), so FD 9 stays open in the caller.
+backup_lock() {
+  local i="$1" mode="${2:-try}" f
+  f="$(backup_dir "$1")/.lock"
+  mkdir -p "$(backup_dir "$1")"
+  exec 9>"$f"
+  case "$mode" in
+    try)    flock -n 9 ;;
+    wait:*) flock -w "${mode#wait:}" 9 ;;
+    *)      die "backup_lock: bad mode '$mode'" ;;
+  esac
+}
+
+# resolve a snapshot short-id for <instance> <kind> <when>, or print nothing.
+#   when = "latest" | "<run tag e.g. 20260910T021503>" | "<short-id of any snapshot in that run>"
+# Every snapshot of one `bdus backup` carries a shared run:<ts> tag; this maps
+# whatever the operator passed to --at onto that run, then picks the kind asked for.
+snap_at() {
+  local i="$1" kind="$2" when="${3:-latest}" run=""
+  need jq
+  case "$when" in
+    ""|latest)
+      run="$(rst "$i" snapshots --tag "instance:$i,kind:files" --latest 1 --json 2>/dev/null \
+             | jq -r '.[0].tags[]? | select(startswith("run:")) | ltrimstr("run:")' || true)" ;;
+    [0-9]*T[0-9]*)
+      run="$when" ;;
+    *)
+      run="$(rst "$i" snapshots "$when" --json 2>/dev/null \
+             | jq -r '.[0].tags[]? | select(startswith("run:")) | ltrimstr("run:")' || true)"
+      [ -n "$run" ] || die "no snapshot '$when' in $i's repo (or it predates run: tags)" ;;
+  esac
+  [ -n "$run" ] || return 0
+  rst "$i" snapshots --tag "instance:$i,kind:$kind,run:$run" --latest 1 --json 2>/dev/null \
+    | jq -r '.[0].short_id // empty'
+}
 
 # ── health ──────────────────────────────────────────────────────────────────
 instance_health() {   # 0 if the published endpoint answers 2xx

@@ -16,10 +16,9 @@ chk  "container-port firewall script"  "[ -x /usr/local/sbin/bdus-fw.sh ] || [ -
 chk  "container-port firewall enabled" "systemctl is-enabled --quiet bdus-fw.service || systemctl is-enabled --quiet bradypus-fw.service"
 chkw "DOCKER-USER has DROP rules"      "has_line 'sudo -n iptables -S DOCKER-USER || iptables -S DOCKER-USER' '-j DROP'"
 chkw "backup cron installed"           "[ -f /etc/cron.d/bdus-backup ] || [ -f /etc/cron.d/bradypus-backup ]"
-if [ -n "$BACKUP_RSYNC_TARGET" ]; then
-  host="${BACKUP_RSYNC_TARGET%%:*}"; host="${host#*@}"
-  chkw "rsync target reachable ($host)" "ssh -o BatchMode=yes -o ConnectTimeout=5 '${BACKUP_RSYNC_TARGET%%:*}' true"
-fi
+chk  "restic present"                 "command -v restic"
+chk  "restic >= 0.17"                 "restic_ok_version"
+chk  "jq present"                     "command -v jq"
 
 for i in $INSTANCES; do
   d="$(instance_dir "$i")"
@@ -31,6 +30,9 @@ for i in $INSTANCES; do
   chk  "  compose config valid"        "dc '$i' config --quiet"
   chk  "  api container running"        "has_line \"dc '$i' ps --status running --format '{{.Service}}'\" '^api\$'"
   chk  "  data/projects present"        "[ -d '$d/data/projects' ]"
+  chk  "  restic repo initialised"      "[ -f '$d/backups/repo/config' ]"
+  chk  "  repo.key is chmod 600"        "[ \"\$(stat -c '%a' '$d/backups/repo.key' 2>/dev/null)\" = 600 ]"
+  chkw "  RESTIC_PASSWORD in .env"      "grep -q '^RESTIC_PASSWORD=' '$d/.env'"
   if instance_has_pg "$i"; then
     pguser_expr="\$(env_get '$i' POSTGRES_USER || echo bdus)"
     chk "  postgres accepting connections" "dc '$i' exec -T postgres pg_isready -U \"$pguser_expr\""

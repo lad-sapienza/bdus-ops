@@ -51,14 +51,31 @@ for i in $INSTANCES; do
     else bad "  martin  not ready"; rc=1; fi
   fi
 
-  # newest backup
-  # shellcheck disable=SC2012
-  nb="$(ls -1t "$(backup_dir "$i")/${proj}-files-"*.tar.gz 2>/dev/null | head -1 || true)"
-  if [ -z "$nb" ]; then bad "  backup  none found"; rc=1
+  # newest backup (restic repo at <instance>/backups/repo/)
+  if ! command -v restic >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    warn "  backup  restic/jq not installed — run: bdus setup host"
+  elif ! backup_repo_ready "$i"; then
+    bad "  backup  repo not initialised — run: bdus backup init $i"; rc=1
   else
-    age=$(( (now - $(date -r "$nb" +%s)) / 86400 ))
-    if [ "$age" -gt "$STALE_BACKUP_DAYS" ]; then bad "  backup  $(basename "$nb")  (${age}d old — stale)"; rc=1
-    else ok "  backup  $(basename "$nb")  (${age}d old)"; fi
+    lt="$(rst "$i" snapshots --tag "instance:$i,kind:files" --latest 1 --json 2>/dev/null | jq -r '.[0].time // empty' || true)"
+    if [ -z "$lt" ]; then bad "  backup  no snapshot yet"; rc=1
+    else
+      age=$(( (now - $(date -d "$lt" +%s)) / 86400 ))
+      if [ "$age" -gt "$STALE_BACKUP_DAYS" ]; then bad "  backup  latest snapshot ${age}d old — stale"; rc=1
+      else ok "  backup  latest snapshot ${age}d old"; fi
+      vf="$(backup_verified "$i")"
+      if [ -f "$vf" ]; then
+        vage=$(( (now - $(date -d "$(cat "$vf")" +%s)) / 86400 ))
+        [ "$vage" -gt "$BACKUP_VERIFY_DAYS" ] && warn "  verify  ${vage}d ago — run: bdus backup verify $i" || true
+      else
+        warn "  verify  never run — bdus backup verify $i"
+      fi
+      raw="$(rst "$i" stats --mode raw-data     --json 2>/dev/null | jq -r '.total_size // empty' || true)"
+      res="$(rst "$i" stats --mode restore-size --json 2>/dev/null | jq -r '.total_size // empty' || true)"
+      if [ -n "$raw" ] && [ -n "$res" ]; then
+        say "  repo    $(numfmt --to=iec "$raw" 2>/dev/null || echo "${raw}B") on disk  vs  $(numfmt --to=iec "$res" 2>/dev/null || echo "${res}B") restored"
+      fi
+    fi
   fi
 done
 

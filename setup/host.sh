@@ -47,6 +47,29 @@ else
   grn "daemon.json already current"
 fi
 
+# ── backup tooling: jq (apt) + restic (pinned binary) ────────────────────
+# `bdus backup` needs both. Debian's own restic is too old for
+# `--stdin-from-command` (needs >= 0.17), so pin a release binary.
+command -v jq >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq jq; }
+grn "jq present"
+
+RESTIC_VER=0.17.3
+if command -v restic >/dev/null 2>&1 && [ "$(restic version 2>/dev/null | awk '{print $2}')" = "$RESTIC_VER" ]; then
+  grn "restic ${RESTIC_VER} present"
+else
+  t="$(mktemp -d)"; f="restic_${RESTIC_VER}_linux_amd64.bz2"
+  # pinned version over HTTPS from the project's own releases — same trust model
+  # as the bradypus.yml fetch in `bdus init`. Optional integrity check against
+  # the release's own checksums:
+  #   curl -fsSL "https://github.com/restic/restic/releases/download/v${RESTIC_VER}/SHA256SUMS" \
+  #     | ( cd "$t" && grep " $f\$" | sha256sum -c - )
+  curl -fsSL -o "$t/$f" "https://github.com/restic/restic/releases/download/v${RESTIC_VER}/$f"
+  bunzip2 "$t/$f"
+  install -m 0755 "$t/restic_${RESTIC_VER}_linux_amd64" /usr/local/bin/restic
+  rm -rf "$t"
+  grn "restic ${RESTIC_VER} installed"
+fi
+
 # ── ufw: host services (does NOT cover Docker-published ports) ─────────────
 if [ "$DO_UFW" -eq 1 ]; then
   command -v ufw >/dev/null || { apt-get update -qq && apt-get install -y -qq ufw; }

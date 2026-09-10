@@ -134,6 +134,10 @@ else
   [ "$pg" = 1 ] && info "  POSTGRES_PASSWORD generated — it is in $d/.env only"
 fi
 
+# ── backup repo (restic) — idempotent; `bdus backup init` does the same standalone
+"$BDUS_OPS_DIR/libexec/bdus-backup" init "$inst" \
+  || warn "backup repo not set up (restic missing? run: bdus setup host, then bdus backup init $inst)"
+
 # ── martin-config.yaml (scaffold once; per-app sources are added by hand,
 #    see README.md "Vector tiles (Martin)") ──────────────────────────────────
 # Martin refuses to start at all with zero configured tile sources ("No tile

@@ -4,10 +4,13 @@
 #   sudo cp <repo>/etc/cron.d/bdus-backup /etc/cron.d/bdus-backup
 #
 # Runs as the user that owns the deploy (not root) so `docker` and the instance
-# dirs are reachable. `bdus backup all` picks the right strategy per instance and
-# does the off-box rsync if BACKUP_RSYNC_TARGET is set in config.env.
+# dirs are reachable. `bdus backup all` snapshots every instance into its restic
+# repo under <instance>/backups/repo/ (a cold, off-box copy of <instance>/backups/
+# is a separate concern — pull it over SSH after this run).
 
 SHELL=/bin/bash
 15 2 * * *  debian  /usr/local/bin/bdus backup all  >> /var/log/bdus-backup.log 2>&1
+# weekly integrity check of every repo (5% data read)
+# 40 3 * * 0  debian  /usr/local/bin/bdus backup verify all  >> /var/log/bdus-backup.log 2>&1
 # optional heartbeat: mail yourself if anything is wrong
 # 5  8 * * *  debian  /usr/local/bin/bdus status || echo "bdus status FAILED on $(hostname)"

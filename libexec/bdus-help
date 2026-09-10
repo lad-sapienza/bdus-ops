@@ -23,9 +23,11 @@ Instances
   logs <instance> [...]   docker compose logs, passthrough
 
 Data
-  backup [inst|all]       data/projects tar; pg instance also pg_dumpall; martin instance also
-                          gis-data tar. Prunes to BACKUP_RETENTION, rsyncs off-box if set.
-  restore <instance> [--db FILE] [--files FILE] [--yes]
+  backup [inst|all]       one dedup restic repo per instance under <instance>/backups/repo/ —
+                          snapshots data/projects, pg_dumpall, .env (+ gis-data), then
+                          forget per BACKUP_KEEP. Subcommands:
+                          init | list <i> | bundle <i> [--at …] | verify | prune.
+  restore <instance> [--at <id|run|latest> | --bundle FILE | --files F [--db F]] [--with-env] [--yes]
                           stop api → restore (latest by default) → start api
 
 Applications

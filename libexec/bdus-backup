@@ -1,77 +1,244 @@
 #!/usr/bin/env bash
-# bdus backup [instance|all] [--no-rsync]
+# bdus backup [instance|all] [--reason TXT] [--prune|--no-prune]    run a backup
+# bdus backup init   [instance|all]                                 create the repo(s)
+# bdus backup list   <instance>                                     snapshots — the restore points
+# bdus backup bundle <instance> [--at <id|run|latest>] [--out FILE]  portable *.bdusinstance.tgz
+# bdus backup verify [instance|all]                                 restic check
+# bdus backup prune  [instance|all]                                 forget --prune now
 #
-# Per instance, into <instance>/backups/ :
-#   sqlite-only    →  <project>-files-<ts>.tar.gz          (data/projects)
-#   with postgres  →  the above  +  <project>-pgall-<ts>.sql.gz   (pg_dumpall)
-#   with martin    →  the above  +  <project>-gis-<ts>.tar.gz     (gis-data)
-#
-# Keeps the newest BACKUP_RETENTION of each kind, then rsyncs the folder to
-# BACKUP_RSYNC_TARGET/<project>/ when that is set (skip with --no-rsync).
+# One deduplicating restic repo per instance at <instance>/backups/repo/. Each run,
+# under one flock on <instance>/backups/.lock (a colliding cron run skips rather
+# than piling up), takes snapshots tagged instance:<i>,run:<ts>,kind:<k>:
+#   pgall  every database + roles   pg_dumpall        via --stdin-from-command
+#   files  data/projects/           docker-backup.sh  via --stdin-from-command
+#   env    <instance>/.env          includes POSTGRES_PASSWORD, by design
+#   gis    gis-data/ (martin only)  real path, native file-level dedup
+# Postgres is snapshotted first, so files is a superset of what the DB references.
+# Then `restic forget` per BACKUP_KEEP (+ --prune per BACKUP_PRUNE), and
+# <instance>/backups/.last-ok is rewritten only after a fully clean run — the
+# receipt a cold, SSH-pull backup of <instance>/backups/ reads to know it copied
+# a consistent state. Needs restic >= 0.17 and jq.
 set -euo pipefail
 . "$BDUS_OPS_DIR/lib/common.sh"
 
-target="all"; rsync=1
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --no-rsync) rsync=0; shift ;;
-    -h|--help)  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    -*)         die "unknown option: $1" ;;
-    *)          target="$1"; shift ;;
-  esac
-done
+sub=run
+case "${1:-}" in
+  init|list|bundle|verify|prune) sub="$1"; shift ;;
+  -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
 
-rc=0
-while read -r i; do
-  proj="$(instance_project "$i")" || { bad "$i: no .env"; rc=1; continue; }
-  dest="$(backup_dir "$i")"; mkdir -p "$dest"
-  ts="$(date +%Y%m%d-%H%M%S)"
-  info "backup $i ($proj)"
+_id() { rst "$1" snapshots --tag "instance:$1,kind:$2" --latest 1 --json 2>/dev/null | jq -r '.[0].short_id // "-"'; }
 
-  # 1 — data/projects (config, .jwt_secret, uploaded files, sqlite DBs)
-  ftar="$dest/${proj}-files-${ts}.tar.gz"
-  if dc "$i" exec -T api /usr/local/bin/docker-backup.sh > "$ftar.part" 2>/dev/null; then
-    mv "$ftar.part" "$ftar"; ok "  $(basename "$ftar")  ($(du -h "$ftar" | cut -f1))"
-  else
-    rm -f "$ftar.part"; bad "  data/projects backup failed (is '$i' up?)"; rc=1; continue
-  fi
+restic_backup_one() {   # $1 instance  $2 reason  $3 prune-mode: auto|always|never
+  local i="$1" reason="${2:-}" pmode="${3:-auto}"
+  local d proj run tags pu errs=0 do_prune=0
+  reason="${reason//[ ,]/_}"    # restic splits tags on ',' — keep the reason one token
+  d="$(instance_dir "$i")"
+  proj="$(instance_project "$i")" || { bad "$i: no .env"; return 1; }
+  backup_repo_ready "$i" || die "$i: no restic repo — run: bdus backup init $i"
 
-  # 2 — every Postgres database + roles
+  # one writer at a time; a cron collision just skips rather than piling up
+  backup_lock "$i" try || { info "$i: another backup/restore is running — skipping"; return 0; }
+  # our flock is the sole gate on this repo, so any restic lock still here is a
+  # crashed run — clear it unconditionally.
+  rst "$i" unlock --remove-all >/dev/null 2>&1 || true
+
+  run="$(date +%Y%m%dT%H%M%S)"
+  tags="instance:$i,run:$run"
+  [ -n "$reason" ] && tags="$tags,reason:$reason"
+  info "backup $i ($proj)  [restic run:$run]"
+
+  # 1 — Postgres first. --stdin-from-command (restic >= 0.17): a pg_dumpall that
+  #     dies mid-stream fails the snapshot instead of storing a truncated dump.
   if instance_has_pg "$i"; then
-    pguser="$(env_get "$i" POSTGRES_USER || echo bdus)"
-    pgz="$dest/${proj}-pgall-${ts}.sql.gz"
-    if dc "$i" exec -T postgres pg_dumpall -U "$pguser" 2>/dev/null | gzip > "$pgz.part"; then
-      mv "$pgz.part" "$pgz"; ok "  $(basename "$pgz")  ($(du -h "$pgz" | cut -f1))"
+    pu="$(env_get "$i" POSTGRES_USER || echo bdus)"
+    if rst "$i" backup --host "$proj" --tag "$tags,kind:pgall" \
+         --stdin-from-command --stdin-filename pgall.sql \
+         -- bash -c 'cd "$1" && exec docker compose exec -T postgres pg_dumpall -U "$2"' _ "$d" "$pu" \
+         >/dev/null; then
+      ok "  pgall  $(_id "$i" pgall)"
     else
-      rm -f "$pgz.part"; bad "  pg_dumpall failed"; rc=1
+      bad "  pg_dumpall snapshot failed"; errs=1
     fi
   fi
 
-  # 3 — gis-data (styles/sprites/fonts — plain host directory, no container needed)
+  # 2 — data/projects, straight from docker-backup.sh (its sqlite/permission handling,
+  #     and symmetry with docker-restore.sh, are why this goes through the container).
+  if rst "$i" backup --host "$proj" --tag "$tags,kind:files" \
+       --stdin-from-command --stdin-filename files.tar \
+       -- bash -c 'cd "$1" && exec docker compose exec -T api /usr/local/bin/docker-backup.sh' _ "$d" \
+       >/dev/null; then
+    ok "  files  $(_id "$i" files)"
+  else
+    bad "  data/projects snapshot failed (is '$i' up?)"; errs=1
+  fi
+
+  # 3 — <instance>/.env  (self-contained DR — passwords included, by design).
+  #     Via stdin so it lands at /env, not the host-absolute path — a bundle or
+  #     `restic dump` then works regardless of BDUS_ROOT on the restoring host.
+  if [ -f "$d/.env" ] && rst "$i" backup --host "$proj" --tag "$tags,kind:env" \
+       --stdin-from-command --stdin-filename env -- cat "$d/.env" >/dev/null; then
+    ok "  env    $(_id "$i" env)"
+  else
+    bad "  .env snapshot failed"; errs=1
+  fi
+
+  # 4 — gis-data (plain host dir → native file-level dedup, no container involved)
   if instance_has_martin "$i"; then
-    gtar="$dest/${proj}-gis-${ts}.tar.gz"
-    if tar czf "$gtar.part" -C "$(instance_dir "$i")" gis-data 2>/dev/null; then
-      mv "$gtar.part" "$gtar"; ok "  $(basename "$gtar")  ($(du -h "$gtar" | cut -f1))"
+    if rst "$i" backup --host "$proj" --tag "$tags,kind:gis" "$d/gis-data" >/dev/null; then
+      ok "  gis    $(_id "$i" gis)"
     else
-      rm -f "$gtar.part"; bad "  gis-data backup failed"; rc=1
+      bad "  gis-data snapshot failed"; errs=1
     fi
   fi
 
-  # 4 — retention (no match for a given kind → glob fails; keep going)
-  for kind in files pgall gis; do
-    # shellcheck disable=SC2012
-    ls -1t "$dest/${proj}-${kind}-"* 2>/dev/null | tail -n +"$((BACKUP_RETENTION + 1))" \
-      | while read -r old; do rm -f "$old"; done || true
+  [ "$errs" -eq 0 ] || { bad "  $i: run had errors — .last-ok NOT updated"; return 1; }
+
+  # 5 — retention. Group by host+paths (= one group per kind: /files.tar, /pgall.sql,
+  #     /env, …/gis-data), NOT by tags — every run has a unique run:<ts> tag, so
+  #     grouping by tags would isolate each snapshot and defeat --keep-*.
+  case "$pmode" in
+    always) do_prune=1 ;;
+    never)  do_prune=0 ;;
+    auto)   case "$BACKUP_PRUNE" in
+              always) do_prune=1 ;;
+              weekly) [ "$(date +%u)" = 7 ] && do_prune=1 || true ;;
+            esac ;;
+  esac
+  # shellcheck disable=SC2086
+  if [ "$do_prune" -eq 1 ]; then
+    rst "$i" forget --tag "instance:$i" --group-by host,paths $BACKUP_KEEP --prune >/dev/null
+    ok "  forget + prune"
+  else
+    rst "$i" forget --tag "instance:$i" --group-by host,paths $BACKUP_KEEP >/dev/null
+    ok "  forget"
+  fi
+
+  # 6 — receipt: only here, only on a clean run
+  printf '%s  run:%s  files:%s pgall:%s env:%s gis:%s\n' \
+    "$(date -Iseconds)" "$run" \
+    "$(_id "$i" files)" "$(_id "$i" pgall)" "$(_id "$i" env)" "$(_id "$i" gis)" \
+    > "$(backup_lastok "$i")"
+  ok "$i backed up"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+case "$sub" in
+
+run)
+  target=all; reason=""; pmode=auto
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --reason)   reason="${2:?}"; shift 2 ;;
+      --prune)    pmode=always; shift ;;
+      --no-prune) pmode=never;  shift ;;
+      -h|--help)  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      -*)         die "unknown option: $1" ;;
+      *)          target="$1"; shift ;;
+    esac
   done
+  need restic; need jq
+  restic_ok_version || die "restic >= 0.17 required (found: $(restic version 2>/dev/null | awk '{print $2}' || echo none))"
+  errs=0
+  while read -r i; do
+    ( restic_backup_one "$i" "$reason" "$pmode" ) || errs=1
+  done < <(resolve_instances "$target")
+  exit "$errs"
+  ;;
 
-  # 5 — off-box copy
-  if [ "$rsync" -eq 1 ] && [ -n "$BACKUP_RSYNC_TARGET" ]; then
-    if rsync -a --delete "$dest/" "${BACKUP_RSYNC_TARGET%/}/${proj}/"; then
-      ok "  rsync → ${BACKUP_RSYNC_TARGET%/}/${proj}/"
-    else
-      bad "  rsync off-box failed"; rc=1
+init)
+  need restic; need jq
+  restic_ok_version || die "restic >= 0.17 required (found: $(restic version 2>/dev/null | awk '{print $2}' || echo none))"
+  while read -r i; do
+    d="$(instance_dir "$i")"
+    [ -f "$d/.env" ] || { bad "$i: no .env — run: bdus init $i"; continue; }
+    mkdir -p "$(backup_dir "$i")"
+    key="$(backup_repo_key "$i")"
+    if [ ! -s "$key" ]; then
+      ( umask 077; gen_pw > "$key" ); ok "$i: repo.key generated (chmod 600)"
     fi
-  fi
-done < <(resolve_instances "$target")
+    if ! grep -q '^RESTIC_PASSWORD=' "$d/.env"; then
+      printf 'RESTIC_PASSWORD=%s\n' "$(cat "$key")" >> "$d/.env"
+      ok "$i: RESTIC_PASSWORD mirrored into .env"
+    fi
+    if backup_repo_ready "$i"; then
+      ok "$i: repo already initialised — $(backup_repo "$i")"
+    else
+      rst "$i" init >/dev/null && ok "$i: repo initialised — $(backup_repo "$i")"
+    fi
+  done < <(resolve_instances "${1:-all}")
+  ;;
 
-exit "$rc"
+list)
+  i="${1:-}"; [ -n "$i" ] || die "usage: bdus backup list <instance>"
+  instance_known "$i" || die "unknown instance '$i'"
+  need restic; need jq
+  backup_repo_ready "$i" || die "$i: no restic repo — run: bdus backup init $i"
+  rst "$i" snapshots --tag "instance:$i" --group-by host,paths
+  ;;
+
+bundle)
+  inst=""; at=latest; out=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --at)  at="${2:?}"; shift 2 ;;
+      --out) out="${2:?}"; shift 2 ;;
+      -*)    die "unknown option: $1" ;;
+      *)     [ -z "$inst" ] || die "one instance"; inst="$1"; shift ;;
+    esac
+  done
+  [ -n "$inst" ] || die "usage: bdus backup bundle <instance> [--at <id|run|latest>] [--out FILE]"
+  instance_known "$inst" || die "unknown instance '$inst'"
+  need restic; need jq
+  backup_repo_ready "$inst" || die "$inst: no restic repo"
+  proj="$(instance_project "$inst")"
+
+  fs="$(snap_at "$inst" files "$at")"; [ -n "$fs" ] || die "no 'files' snapshot for --at '$at'"
+  ps="$(snap_at "$inst" pgall "$at")"
+  es="$(snap_at "$inst" env   "$at")"
+  ts="$(date +%Y%m%d-%H%M%S)"
+  if [ -z "$out" ]; then
+    mkdir -p "$(backup_dir "$inst")/bundles"
+    out="$(backup_dir "$inst")/bundles/${proj}-${ts}.bdusinstance.tgz"
+  fi
+
+  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+  rst "$inst" dump "$fs" /files.tar | gzip > "$tmp/files.tar.gz"
+  if [ -n "$ps" ]; then rst "$inst" dump "$ps" /pgall.sql | gzip > "$tmp/pgall.sql.gz"; fi
+  if [ -n "$es" ]; then rst "$inst" dump "$es" /env > "$tmp/env"; fi
+  {
+    printf 'instance=%s\nproject=%s\n' "$inst" "$proj"
+    printf 'files_snap=%s\npgall_snap=%s\nenv_snap=%s\n' "$fs" "${ps:-}" "${es:-}"
+    printf 'at=%s\ncreated=%s\n' "$at" "$ts"
+  } > "$tmp/manifest"
+  tar czf "$out" -C "$tmp" .
+  ok "bundle → $out  ($(du -h "$out" | cut -f1))"
+  ;;
+
+verify)
+  need restic
+  errs=0
+  while read -r i; do
+    backup_repo_ready "$i" || { warn "$i: no repo — skip"; continue; }
+    info "verify $i"
+    if rst "$i" check --read-data-subset=5%; then
+      date -Iseconds > "$(backup_verified "$i")"; ok "  ok"
+    else
+      bad "  FAILED"; errs=1
+    fi
+  done < <(resolve_instances "${1:-all}")
+  exit "$errs"
+  ;;
+
+prune)
+  need restic
+  while read -r i; do
+    backup_repo_ready "$i" || { warn "$i: no repo — skip"; continue; }
+    backup_lock "$i" wait:600 || die "$i: backup lock busy"
+    info "prune $i"
+    # shellcheck disable=SC2086
+    rst "$i" forget --tag "instance:$i" --group-by host,paths $BACKUP_KEEP --prune
+  done < <(resolve_instances "${1:-all}")
+  ;;
+
+esac

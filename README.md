@@ -270,7 +270,8 @@ for a cron heartbeat.
 1. Aborts unless `API_IMAGE:<ver>` **and** `APP_IMAGE:<ver>` exist on GHCR
    (`docker manifest inspect`).
 2. For each instance in `INSTANCES` order (so `demo` before `prod`):
-   - `bdus backup <instance> --no-rsync` first (skip with `--no-backup`)
+   - `bdus backup <instance>` first (skip with `--no-backup`), tagged
+     `reason:pre-update_<from>-to-<to>`
    - `sed` `BDUS_VERSION` in `.env`, `docker compose pull`, `up -d`
    - poll health up to 120 s
    - **on failure**: restore the previous `.env` pin, `up -d`, and stop with a
@@ -282,45 +283,84 @@ for a cron heartbeat.
 A version bump runs the DB **migrations** on the first request after it —
 that's exactly why the backup above happens *before* `up -d`, automatically.
 
-### `bdus backup [instance|all] [--no-rsync]`
+### `bdus backup [instance|all] [--reason TXT] [--prune|--no-prune]`
 
-Into `<instance>/backups/`:
+One deduplicating **restic** repository per instance at `<instance>/backups/repo/`,
+so 27 retained restore points cost roughly one full copy plus the daily deltas
+(a `pg_dumpall` or a live `.sqlite` changes by a few blocks a day; restic stores
+only those). `bdus init` creates it; `bdus backup init <instance|all>` does the
+same standalone (generates `repo.key` — chmod 600, mirrored to `.env` as
+`RESTIC_PASSWORD` — and runs `restic init`).
 
-- always `<project>-files-<ts>.tar.gz` — `data/projects/`
-  (`config.json`, `.jwt_secret`, uploaded files, sqlite DBs), produced by
-  `docker-backup.sh` inside the running `api` container
-- for a Postgres instance, also `<project>-pgall-<ts>.sql.gz` — `pg_dumpall`
-  (every database + roles — this already covers each app's `gis` schema, no
-  separate step needed)
-- for a Martin instance, also `<project>-gis-<ts>.tar.gz` — a plain host `tar`
-  of `gis-data/` (styles/sprites/fonts), no container involved
+Each `bdus backup` run, **under one `flock`** on `<instance>/backups/.lock`
+(a colliding cron run skips rather than piling up), takes four snapshots tagged
+`instance:<i>,run:<ts>,kind:<k>`:
 
-Keeps the newest `BACKUP_RETENTION` of each kind. If `BACKUP_RSYNC_TARGET` is set
-and `--no-rsync` is not given, `rsync -a --delete` the folder to
-`<target>/<project>/`.
+| kind | source | how |
+|------|--------|-----|
+| `pgall` | every database + roles | `pg_dumpall` streamed in (`--stdin-from-command`) |
+| `files` | `data/projects/` | `docker-backup.sh` streamed in |
+| `env`   | `<instance>/.env` | streamed in — **includes `POSTGRES_PASSWORD`**, by design (self-contained restore) |
+| `gis`   | `gis-data/` (martin only) | real path, native file-level dedup |
+
+Postgres is snapshotted first so `files` is a superset of what the DB references.
+Then `restic forget` applies `BACKUP_KEEP` per kind; `--prune` runs per
+`BACKUP_PRUNE` (`weekly`/`always`/`never`, or force with `--prune`/`--no-prune`).
+`<instance>/backups/.last-ok` is rewritten only after a fully clean run — a cold,
+SSH-pull backup of the whole `<instance>/backups/` directory reads that receipt
+to know it copied a consistent state.
+
+- `bdus backup list <instance>` — the restore points (a `restic snapshots`),
+  grouped by kind, `run:<ts>` shown
+- `bdus backup bundle <instance> [--at <id|run|latest>] [--out F]` — reconstruct
+  a portable `<project>-<ts>.bdusinstance.tgz` (`manifest` + `files.tar.gz` +
+  `pgall.sql.gz` + `env`) from a chosen point — the offline / hand-off / "freeze
+  this milestone outside the retention policy" artifact
+- `bdus backup verify [instance|all]` — `restic check --read-data-subset=5%`,
+  records the date for `bdus status` (`BACKUP_VERIFY_DAYS`)
+- `bdus backup prune [instance|all]` — `forget --prune` now, under the lock
+
+`bdus update` always takes a fresh backup first, tagged
+`reason:pre-update_<from>-to-<to>`, so a failed upgrade rolls back with
+`bdus restore <i> --at <that run>`.
+
+Needs `restic ≥ 0.17` and `jq` (`bdus setup host` installs both; the pinned
+restic version is in `setup/host.sh`).
 
 Cron: the repo ships a sample at `etc/cron.d/bdus-backup` (see Layout below)
 — the user on the cron line must be the one that owns the deploy, not root.
-`.jwt_secret` **and** (for a pgsql app) the role's password in cleartext in
-`config.json` are in these archives — protect the destination as sensitive
-data.
+`.jwt_secret`, the pgsql role passwords in `config.json`, and
+`POSTGRES_PASSWORD` in the `env` snapshot are all in the backup by design —
+protect the destination as sensitive data. The restic repo is encrypted, but
+`repo.key` sits next to it, so a cold copy is cleartext-equivalent: it buys
+integrity checking and dedup, not confidentiality.
 
-### `bdus restore <instance> [--db FILE] [--files FILE] [--yes]`
+### `bdus restore <instance> [--at <id|run|latest> | --bundle FILE | --files F [--db F]] [--with-env] [--yes]`
 
-`docker compose stop api` → restore → `start api` → wait health.
+`docker compose stop api` → restore → `start api` → wait health, held under the
+backup `flock`.
 
-- `--files` defaults to the newest `<project>-files-*.tar.gz`; extracted into
-  `data/projects/` via `docker-restore.sh` (files not in the archive are left
-  alone)
-- `--db` (Postgres instances) defaults to the newest `<project>-pgall-*.sql.gz`;
-  replayed with `psql -d postgres` (recreates databases as dumped)
+- `--at <id|run|latest>` — restore point from the local repo. `id` is any
+  snapshot short-id of a run, `run` is a `run:<ts>` tag, `latest` the newest.
+  Assumed (`latest`) when nothing else is given.
+- `--bundle FILE` — a `*.bdusinstance.tgz` from `bdus backup bundle`
+- `--files FILE [--db FILE]` — escape hatch: restore from a loose `tar.gz`
+  (+ `pg_dumpall` `.sql.gz`), e.g. a pre-restic `<project>-files-*.tar.gz` still
+  sitting in `backups/`
+- `--with-env` — also lay down `<instance>/.env` from the restore point. **Off by
+  default** (an old `.env` is a `BDUS_VERSION`/port rollback); if `.env` differs
+  it is written to `.env.restored` for you to diff. Implied when `.env` is
+  missing (bare-metal DR).
+- files present in the target but absent from the archive are left alone;
+  Postgres is replayed with `psql -d postgres`
 - confirms unless `--yes`
 
 `gis-data/` isn't restored by this command (it's a plain directory, not a
-volume) — untar the `-gis-` backup over it by hand if needed.
+volume) — `restic restore <snap> --target /` the `kind:gis` snapshot by hand.
 
 For a full disaster-recovery restore into a fresh Postgres, `bdus init` the
-instance first, then `bdus restore`.
+instance first (it creates the repo), then `bdus restore` — `--with-env` is
+automatic while the fresh instance still has no `.env`.
 
 ### `bdus app add <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--db-user R] [--password-stdin] [--gis] [--gis-write]`
 
@@ -556,11 +596,11 @@ right directory.
 
 Checks invariants and exits non-zero on failure: docker enabled + `live-restore`,
 `ufw` active, `bdus-fw.sh` + `bdus-fw.service` present/enabled, `DOCKER-USER`
-DROP rules present, backup cron installed, rsync target reachable; per instance:
-dir + `.env` (perms `600`) + `bdus.override.yml`, compose config valid, `api`
-running, `data/projects/` present, Postgres accepting connections **and**
-its data actually readable (if enabled), `gis-data/` present + Martin healthy
-(if enabled). Some host checks need passwordless `sudo` for `iptables`/`ufw`;
+DROP rules present, backup cron installed, `restic ≥ 0.17` + `jq` present; per
+instance: dir + `.env` (perms `600`) + `bdus.override.yml`, compose config valid,
+`api` running, `data/projects/` present, restic repo initialised + `repo.key`
+`600`, Postgres accepting connections **and** its data actually readable
+(if enabled), `gis-data/` present + Martin healthy (if enabled). Some host checks need passwordless `sudo` for `iptables`/`ufw`;
 they degrade to warnings otherwise.
 
 Postgres gets two separate checks, not one: `pg_isready` only confirms the
@@ -581,9 +621,10 @@ to open that same catalog file — it would have caught this immediately.
 | `GHCR_YAML_REF` | git ref for the fetched `bradypus.yml` |
 | `BDUS_VERSION` | default pin written by `bdus init` |
 | `HEALTH_PATH` | unauthenticated 200 endpoint for health checks |
-| `STALE_BACKUP_DAYS` | `bdus status` fails if the newest backup is older |
-| `BACKUP_RETENTION` | archives kept per instance per kind |
-| `BACKUP_RSYNC_TARGET` | `user@host:/path` for off-box copy; empty disables |
+| `STALE_BACKUP_DAYS` | `bdus status` fails if the newest backup / snapshot is older |
+| `BACKUP_KEEP` | `restic forget` policy, e.g. `--keep-daily 7 --keep-weekly 8 …` |
+| `BACKUP_PRUNE` | when `forget` also prunes — `weekly` (Sundays) / `always` / `never` |
+| `BACKUP_VERIFY_DAYS` | `bdus status` warns if the last `bdus backup verify` is older |
 | `PROXY_ALLOW_IPS` | IPs allowed through `DOCKER-USER` to the published ports |
 | `INSTANCE_<n>_PORT` | `<ip>:<port>` bind for the frontend |
 | `INSTANCE_<n>_POSTGRES` | `1` adds a shared Postgres (PostGIS-enabled) service, `0` sqlite only |
