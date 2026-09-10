@@ -9,8 +9,8 @@
 # One deduplicating restic repo per instance at <instance>/backups/repo/. Each run,
 # under one flock on <instance>/backups/.lock (a colliding cron run skips rather
 # than piling up), takes snapshots tagged instance:<i>,run:<ts>,kind:<k>:
-#   pgall  every database + roles   pg_dumpall        via --stdin-from-command
-#   files  data/projects/           docker-backup.sh  via --stdin-from-command
+#   pgall  every database + roles   pg_dumpall  streamed in (--stdin-from-command)
+#   files  data/projects/           plain `tar cf -` in the api container, streamed in
 #   env    <instance>/.env          includes POSTGRES_PASSWORD, by design
 #   gis    gis-data/ (martin only)  real path, native file-level dedup
 # Postgres is snapshotted first, so files is a superset of what the DB references.
