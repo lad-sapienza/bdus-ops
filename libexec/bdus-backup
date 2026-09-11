@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bdus backup [instance|all] [--reason TXT] [--prune|--no-prune]    run a backup
 # bdus backup init   [instance|all]                                 create the repo(s)
-# bdus backup list   <instance>                                     snapshots — the restore points
+# bdus backup list   <instance>                                     runs — RUN is the id for --at
 # bdus backup bundle <instance> [--at <id|run|latest>] [--out FILE]  portable *.bdusinstance.tgz
 # bdus backup verify [instance|all]                                 restic check
 # bdus backup prune  [instance|all]                                 forget --prune now
@@ -185,7 +185,43 @@ list)
   instance_known "$i" || die "unknown instance '$i'"
   need restic; need jq
   backup_repo_ready "$i" || die "$i: no restic repo — run: bdus backup init $i"
-  rst "$i" snapshots --tag "instance:$i" --group-by host,paths
+
+  # One row per run:<ts> (a backup, not a path) — RUN is exactly what --at
+  # wants for `bdus backup bundle` / `bdus restore`. kind:* snapshots that
+  # share a run tag are pivoted together and their sizes summed; the reason
+  # tag (if any) rides along since restic_backup_one stamps it on every kind.
+  declare -A kinds=()
+  declare -A reasons=()
+  declare -A sizes=()
+  while IFS=$'\t' read -r run kind reason size; do
+    kinds["$run"]="${kinds[$run]:+${kinds[$run]},}$kind"
+    [ "$reason" = - ] || reasons["$run"]="$reason"
+    sizes["$run"]=$(( ${sizes[$run]:-0} + size ))
+  done < <(rst "$i" snapshots --tag "instance:$i" --json 2>/dev/null | jq -r '
+    .[] | [
+      ((.tags[]? | select(startswith("run:"))    | ltrimstr("run:"))    // "unknown"),
+      ((.tags[]? | select(startswith("kind:"))   | ltrimstr("kind:"))   // "?"),
+      ((.tags[]? | select(startswith("reason:")) | ltrimstr("reason:")) // "-"),
+      (.summary.total_bytes_processed // .summary.total_size // 0)
+    ] | @tsv
+  ')
+  [ "${#kinds[@]}" -gt 0 ] || { warn "$i: no snapshots yet"; exit 0; }
+
+  printf '%-16s %-20s %-10s %-28s %s\n' RUN TIME SIZE KINDS REASON
+  for run in $(printf '%s\n' "${!kinds[@]}" | sort -r); do
+    iso="${run:0:4}-${run:4:2}-${run:6:2}T${run:9:2}:${run:11:2}:${run:13:2}"
+    t="$(date -d "$iso" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$run")"
+    sz="$(numfmt --to=iec --suffix=B "${sizes[$run]}" 2>/dev/null || echo "${sizes[$run]}B")"
+    [ "${sizes[$run]}" -gt 0 ] || sz="-"
+    k="${kinds[$run]}"
+    # files/env are unconditional every run — missing one flags a crashed/partial run
+    # (pgall and gis are legitimately absent on instances without postgres/martin).
+    miss=""
+    [[ ",$k," == *,files,* ]] || miss="${miss}no-files "
+    [[ ",$k," == *,env,*   ]] || miss="${miss}no-env "
+    [ -z "$miss" ] || k="$k ⚠${miss% }"
+    printf '%-16s %-20s %-10s %-28s %s\n' "$run" "$t" "$sz" "$k" "${reasons[$run]:--}"
+  done
   ;;
 
 bundle)
