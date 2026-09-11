@@ -56,7 +56,7 @@ db_cmd=(); env_cmd=()
 
 if [ -n "$bundle" ]; then
   [ -f "$bundle" ] || die "not found: $bundle"
-  tmp="$(mktemp -d)"; tar xzf "$bundle" -C "$tmp"
+  tmp="$(work_dir)"; tar xzf "$bundle" -C "$tmp"
   [ -f "$tmp/files.tar" ] || die "not a bdusinstance bundle (no files.tar)"
   src="bundle $bundle"
   files_cmd=(cat "$tmp/files.tar")

@@ -52,6 +52,11 @@ docker compose version >/dev/null 2>&1 || die "'docker compose' (v2) not availab
 # ── instances ───────────────────────────────────────────────────────────────
 instance_dir() { printf '%s/%s' "$BDUS_ROOT" "$1"; }
 
+# work_dir — mktemp -d, but rooted under BDUS_ROOT instead of the system
+# default (often a small or tmpfs /tmp, distinct from the data volume): app
+# trees with thousands of files, db dumps and backup bundles need real room.
+work_dir() { mkdir -p "$BDUS_ROOT/.tmp"; mktemp -d "$BDUS_ROOT/.tmp/XXXXXXXX"; }
+
 instance_known() {
   local i
   for i in $INSTANCES; do [ "$i" = "$1" ] && return 0; done

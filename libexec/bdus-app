@@ -420,7 +420,7 @@ case "$action" in
     #     compose network (plain `docker run`, not `docker compose run` —
     #     pgloader isn't a declared service, same pattern already used
     #     elsewhere in bdus-ops for one-off containers).
-    work="$(mktemp -d)"
+    work="$(work_dir)"
     target="postgresql://${dbuser}:${dbpass}@postgres:5432/${dbname}"
     cat > "$work/pass-a.load" <<EOF
 load database
@@ -490,7 +490,7 @@ EOF
     expdir="$(instance_dir "$inst")/exports"; mkdir -p "$expdir"
     [ -n "$out" ] || out="$expdir/${app}-${inst}-${ts}.bdusapp.tgz"
 
-    work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+    work="$(work_dir)"; trap 'rm -rf "$work"' EXIT
     info "export $inst/$app ($eng) → $out"
 
     # the projects/<app>/ tree — a plain tar from inside the api container (root
@@ -522,7 +522,7 @@ EOF
     instance_known "$inst" || die "unknown instance '$inst'"
     [ -f "$file" ] || die "archive not found: $file"
 
-    work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+    work="$(work_dir)"; trap 'rm -rf "$work"' EXIT
     tar xzf "$file" -C "$work"
 
     # a bdusapp bundle is one tar.gz: exactly one top-level <app>/ directory,

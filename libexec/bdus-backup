@@ -253,7 +253,7 @@ bundle)
   # compress the lot (plain tar + plain SQL squeeze far better in a single pass
   # than re-gzipping already-gzipped members). ORIGIN is a human breadcrumb —
   # bdus restore --bundle does not parse it.
-  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+  tmp="$(work_dir)"; trap 'rm -rf "$tmp"' EXIT
   rst "$inst" dump "$fs" /files.tar > "$tmp/files.tar"
   if [ -n "$ps" ]; then rst "$inst" dump "$ps" /pgall.sql > "$tmp/pgall.sql"; fi
   if [ -n "$es" ]; then rst "$inst" dump "$es" /env      > "$tmp/env"; fi
