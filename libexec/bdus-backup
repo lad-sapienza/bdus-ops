@@ -68,12 +68,19 @@ restic_backup_one() {   # $1 instance  $2 reason  $3 prune-mode: auto|always|nev
   #     dedups a plain tar per-file; a gzip stream cascades a 1-file change across
   #     half the archive. /var/www/html/projects must match the api image docroot
   #     (bdus.override.yml bind-mounts ./data/projects there).
+  #     This is the one step that can run long with nothing to show for it — tar
+  #     and restic both stream silently — so a background ticker says it's still
+  #     alive instead of leaving the operator guessing whether it hung.
+  ( t0=$SECONDS; while sleep 30; do info "  files  still archiving… $((SECONDS - t0))s"; done ) &
+  hb=$!
   if rst "$i" backup --host "$proj" --tag "$tags,kind:files" \
        --stdin-from-command --stdin-filename files.tar \
        -- bash -c 'cd "$1" && exec docker compose run --rm --no-deps -T --entrypoint sh api -c "cd /var/www/html/projects && exec tar cf - ."' _ "$d" \
        >/dev/null; then
+    kill "$hb" 2>/dev/null || true; wait "$hb" 2>/dev/null || true
     ok "  files  $(_id "$i" files)"
   else
+    kill "$hb" 2>/dev/null || true; wait "$hb" 2>/dev/null || true
     bad "  data/projects snapshot failed"; errs=1
   fi
 
