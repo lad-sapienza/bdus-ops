@@ -227,6 +227,37 @@ One-time, re-execs under `sudo`. Idempotent.
 
 Re-login after the first run (docker group).
 
+**Recovery from the pre-5988590 recursive chown** — versions before that fix
+ran `chown -R $USR:$USR $BDUS_ROOT` on every run, not just the first. A second
+run on a live host re-owned everything under it to the deploy user, including
+data the containers themselves own: `data/pgdata` (the postgres image's uid)
+and every app's `data/projects/<app>/` tree (the api image's `www-data`).
+Symptoms differ and only one is caught automatically:
+
+- Postgres: real queries fail (`could not open file "global/pg_filenode.map":
+  Permission denied`) even though `pg_isready` still reports healthy —
+  `bdus doctor` catches this (its second, real-query Postgres check, see
+  above).
+- Apps: any write (login, export, upload) fails with `BraDypUS API error
+  [server_error]: Runtime directory is not writable: .../projects/<app>/files`
+  in the api container's logs, surfacing to the user as a generic
+  `server_error` with no other clue. **`bdus doctor` does not catch this** —
+  it only checks Postgres, not `data/projects/`.
+
+Recovery, in order:
+
+1. `cd <instance> && docker compose restart api` — the api image fixes up
+   `data/projects/` ownership on every boot; this alone is usually enough,
+   no manual `chown` needed.
+2. Postgres's own boot-time fixup does **not** repair an already-initialized
+   `PGDATA` — restore it by hand:
+   `docker compose stop postgres && sudo chown -R 70:70 <instance>/data/pgdata && docker compose start postgres`
+3. Confirm with `bdus doctor` and, per app,
+   `stat -c '%U:%G' <instance>/data/projects/<app>/files` against a known-good
+   app, before assuming it's fixed — do this for **every** instance
+   (`prod`/`demo`/…) that shares the same `$BDUS_ROOT`, since the bad chown
+   hit all of them at once, and errors only surface on the next write per app.
+
 ### `bdus init <instance> [--version X.Y.Z] [--force]`
 
 Creates `$BDUS_ROOT/<instance>/` from the `INSTANCE_<instance>_*` keys in
