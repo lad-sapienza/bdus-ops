@@ -2,6 +2,7 @@
 # bdus app add       <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--db-user R] [--password-stdin] [--gis] [--gis-write]
 # bdus app gis       <instance> <app> [--write]
 # bdus app to-pgsql  <instance> <app> [--yes]
+# bdus app optimize-images <instance> <app> [--max-size N] [--dpi N] [--quality N] [--out jpg|webp] [--yes] [--no-backup]
 # bdus app list      [instance|all]
 # bdus app export    <instance> <app> [--out FILE]
 # bdus app pack      <dir> [--name <slug>] [--out FILE]        # dev machine: folder → *.bdusapp.tgz (sqlite)
@@ -33,6 +34,23 @@
 #          bdus_queries — saved SQL that may not be Postgres-portable) are
 #          excluded, not migrated. Exports a safety copy first, asks you to
 #          type the app name; the renamed sqlite copy is kept, not deleted.
+# optimize-images — re-encodes every raster row in an app's bdus_files table
+#          (jpg/jpeg/png/bmp/tif/tiff/webp — GIFs, PDFs and SVGs are left alone)
+#          to a consistent size/format/quality: shrink-only resize to fit
+#          --max-size x --max-size (aspect preserved, same box semantics as the
+#          app's own upload-time resizer), re-encode at --quality into --out
+#          (jpg or webp), tag the result --dpi (metadata only, no resampling).
+#          A multi-page source (e.g. a scanned tif) is flattened to one frame
+#          first. Alpha is preserved for webp output; for jpg, which has no
+#          alpha channel, it's composited onto white. The old physical file is
+#          deleted and bdus_files.ext updated only when the extension actually
+#          changed. Runs the conversion itself in one throwaway alpine+
+#          imagemagick container against the instance's own
+#          data/projects/<app>/files bind mount — no change to the api image,
+#          which only carries GD (no TIFF support) — then restores www-data
+#          ownership. Exports a safety copy first (skip with --no-backup) and
+#          asks to confirm (skip with --yes): this recompresses in place and
+#          is not reversible.
 # export — one portable archive of a single app, into <instance>/exports/:
 #          a single tar.gz with the projects/<app>/ tree at the top and, for a
 #          pgsql app, a `db.dump` (pg_dump -Fc) beside it. No manifest — the
@@ -457,6 +475,184 @@ EOF
     info "  rollback safety net kept: projects/${app}-sqlite/ (remove by hand once verified)"
     ;;
 
+  optimize-images)
+    inst="${1:?bdus app optimize-images <instance> <app> [--max-size N] [--dpi N] [--quality N] [--out jpg|webp] [--yes] [--no-backup]}"
+    app="${2:?missing <app>}"; shift 2 || true
+    max_size=2000 dpi=72 quality=85 out=webp yes=0 nobackup=0
+    while [ $# -gt 0 ]; do case "$1" in
+      --max-size)  max_size="${2:?--max-size needs a value}"; shift 2 ;;
+      --dpi)       dpi="${2:?--dpi needs a value}"; shift 2 ;;
+      --quality)   quality="${2:?--quality needs a value}"; shift 2 ;;
+      --out)       out="${2:?--out needs a value}"; shift 2 ;;
+      --yes|-y)    yes=1; shift ;;
+      --no-backup) nobackup=1; shift ;;
+      *) die "unknown option: $1" ;;
+    esac; done
+    instance_known "$inst" || die "unknown instance '$inst'"
+    valid_app_name "$app" || die "bad app name '$app'"
+    [[ "$max_size" =~ ^[0-9]+$ ]] && [ "$max_size" -gt 0 ]                      || die "--max-size must be a positive integer"
+    [[ "$dpi"      =~ ^[0-9]+$ ]] && [ "$dpi" -gt 0 ]                           || die "--dpi must be a positive integer"
+    [[ "$quality"  =~ ^[0-9]+$ ]] && [ "$quality" -ge 1 ] && [ "$quality" -le 100 ] || die "--quality must be an integer 1-100"
+    case "$out" in jpg|webp) ;; *) die "--out must be 'jpg' or 'webp' (got '$out')" ;; esac
+
+    { read -r eng; read -r dbname; read -r dbuser; read -r _dbpass; } < <(app_cfg "$inst" "$app") || true
+    [ -n "$eng" ] || die "app '$app' not found on '$inst' (is it running?)"
+
+    d="$(instance_dir "$inst")"
+    files_dir="$d/data/projects/$app/files"
+    [ -d "$files_dir" ] || die "no files/ directory for '$app' on '$inst' ($files_dir)"
+
+    work="$(work_dir)"; trap 'rm -rf "$work"' EXIT
+
+    # 1 — candidate rows: raster images only; gif/svg/pdf/anything else is never selected
+    info "listing candidate images in '$app' ($eng)…"
+    if [ "$eng" = pgsql ]; then
+      dc "$inst" exec -T postgres psql -U "$dbuser" -d "$dbname" -tAqc \
+        "SELECT id::text || chr(9) || lower(ext) FROM bdus_files WHERE lower(ext) IN ('jpg','jpeg','png','bmp','tif','tiff','webp')" \
+        | grep -v '^$' > "$work/candidates.tsv" || true
+    else
+      dc "$inst" exec -T -e A="$app" api php -r '
+        $db = new PDO("sqlite:projects/".getenv("A")."/db/bdus.sqlite");
+        $exts = ["jpg","jpeg","png","bmp","tif","tiff","webp"];
+        $ph = implode(",", array_fill(0, count($exts), "?"));
+        $stmt = $db->prepare("SELECT id, ext FROM bdus_files WHERE lower(ext) IN ($ph)");
+        $stmt->execute($exts);
+        foreach ($stmt as $row) { echo $row["id"]."\t".strtolower($row["ext"])."\n"; }
+      ' > "$work/candidates.tsv"
+    fi
+
+    total="$(wc -l < "$work/candidates.tsv" | tr -d ' ')"
+    [ "$total" -gt 0 ] || { ok "no matching images in '$app' — nothing to do"; exit 0; }
+
+    say ""
+    warn "OPTIMIZE IMAGES  $inst/$app  ($eng) — recompresses in place, not reversible"
+    say "  $total candidate image(s) (jpg/jpeg/png/bmp/tif/tiff/webp rows in bdus_files)"
+    say "  resized to fit ${max_size}x${max_size} (shrink-only), re-encoded as .$out at quality $quality, tagged ${dpi}dpi"
+    say "  multi-page sources (tif) flattened to one frame; alpha kept for webp, white for jpg"
+    say "  GIFs, PDFs and SVGs are left untouched"
+    say ""
+
+    if [ "$nobackup" -ne 1 ]; then
+      info "exporting first (safety copy)…"
+      "$BDUS_OPS_DIR/libexec/bdus-app" export "$inst" "$app" || die "export failed — aborting"
+    else
+      warn "--no-backup: the originals will not be recoverable"
+    fi
+
+    [ "$yes" -eq 1 ] || confirm "Proceed?" || { info "aborted"; exit 0; }
+
+    # 2 — the actual conversion, in one throwaway alpine+imagemagick container
+    #     against the instance's own bind mount: the api image only carries GD
+    #     (no TIFF support), and spinning one container per file would be far
+    #     too slow for a whole app's image library.
+    cat > "$work/optimize.sh" <<'SCRIPT'
+#!/bin/sh
+set -u
+rm -f /files/.optimize-*-tmp.* 2>/dev/null || true
+tab="$(printf '\t')"
+
+process() {
+  id="$1"; oldext="$2"
+  src="/files/$id.$oldext"
+  if [ ! -f "$src" ]; then
+    echo "FAIL $id $oldext missing-source-file"
+    return
+  fi
+  # the temp file's real extension must exactly match $OUT_EXT — a trailing
+  # .tmp (e.g. ".jpg.tmp") makes imagemagick fall back to a generic writer
+  # for resolution metadata, silently ignoring -density/-units below (the
+  # pixels still came out as the right format, only the dpi tag was wrong),
+  # so "tmp" goes in the basename, not after the extension.
+  tmp="/files/.optimize-${id}-tmp.${OUT_EXT}"
+  err="/tmp/err-$id"
+  if [ "$OUT_EXT" = jpg ]; then
+    magick "$src" -auto-orient -background none -flatten \
+      -resize "${MAXSZ}x${MAXSZ}>" -units PixelsPerInch -density "$DPI" \
+      -background white -alpha remove -alpha off -quality "$QUALITY" \
+      "$tmp" 2>"$err"
+  else
+    magick "$src" -auto-orient -background none -flatten \
+      -resize "${MAXSZ}x${MAXSZ}>" -units PixelsPerInch -density "$DPI" \
+      -quality "$QUALITY" \
+      "$tmp" 2>"$err"
+  fi
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ ! -s "$tmp" ]; then
+    echo "FAIL $id $oldext $(tr '\n' ' ' < "$err" | cut -c1-200)"
+    rm -f "$tmp" "$err"
+    return
+  fi
+  rm -f "$err"
+  dst="/files/$id.$OUT_EXT"
+  mv -f "$tmp" "$dst"
+  [ "$oldext" = "$OUT_EXT" ] || rm -f "$src"
+  echo "OK $id $oldext $OUT_EXT"
+}
+
+while IFS="$tab" read -r id oldext; do
+  [ -n "$id" ] || continue
+  process "$id" "$oldext"
+done < /work/candidates.tsv
+SCRIPT
+
+    info "converting… (throwaway alpine+imagemagick container)"
+    ( t0=$SECONDS; while sleep 30; do info "  still converting… $((SECONDS - t0))s"; done ) &
+    hb=$!
+    if docker run --rm \
+         -e MAXSZ="$max_size" -e DPI="$dpi" -e QUALITY="$quality" -e OUT_EXT="$out" \
+         -v "$work:/work:ro" -v "$files_dir:/files" \
+         alpine sh -c 'apk add --no-cache imagemagick imagemagick-jpeg imagemagick-tiff imagemagick-webp >/dev/null 2>&1 && sh /work/optimize.sh' \
+         > "$work/results.tsv"; then
+      kill "$hb" 2>/dev/null || true; wait "$hb" 2>/dev/null || true
+    else
+      kill "$hb" 2>/dev/null || true; wait "$hb" 2>/dev/null || true
+      die "image-conversion container failed (docker/network/apk issue?) — bdus_files was not touched"
+    fi
+
+    # ownership — the alpine container wrote these files as root
+    dc "$inst" exec -T api chown -R www-data:www-data "projects/$app/files" 2>/dev/null || true
+
+    ok_n="$(grep -c '^OK'   "$work/results.tsv" || true)"
+    fail_n="$(grep -c '^FAIL' "$work/results.tsv" || true)"
+    ok "  converted $ok_n/$total image(s)"
+    if [ "$fail_n" -gt 0 ]; then
+      warn "  $fail_n failed (left untouched):"
+      grep '^FAIL' "$work/results.tsv" | sed 's/^/    /' >&2
+    fi
+
+    # 3 — bdus_files.ext, only for rows whose extension actually changed
+    awk '$1=="OK" && $3!=$4 { print $2"\t"$4 }' "$work/results.tsv" > "$work/updates.tsv"
+    upd_n="$(wc -l < "$work/updates.tsv" | tr -d ' ')"
+    if [ "$upd_n" -gt 0 ]; then
+      info "updating bdus_files.ext for $upd_n row(s)…"
+      if [ "$eng" = pgsql ]; then
+        { echo "BEGIN;"
+          while IFS="$(printf '\t')" read -r id newext; do
+            [ -n "$id" ] || continue
+            printf "UPDATE bdus_files SET ext = '%s' WHERE id = %s;\n" "$newext" "$id"
+          done < "$work/updates.tsv"
+          echo "COMMIT;"
+        } | dc "$inst" exec -T postgres psql -U "$dbuser" -d "$dbname" -v ON_ERROR_STOP=1 -q
+      else
+        dc "$inst" exec -T -e A="$app" api php -r '
+          $db = new PDO("sqlite:projects/".getenv("A")."/db/bdus.sqlite");
+          $db->beginTransaction();
+          $stmt = $db->prepare("UPDATE bdus_files SET ext = ? WHERE id = ?");
+          while (($line = fgets(STDIN)) !== false) {
+            $line = trim($line);
+            if ($line === "") continue;
+            [$id, $ext] = explode("\t", $line, 2);
+            $stmt->execute([$ext, (int)$id]);
+          }
+          $db->commit();
+        ' < "$work/updates.tsv"
+      fi
+      ok "  bdus_files updated ($upd_n row(s))"
+    fi
+
+    ok "optimized images for '$app' on '$inst'"
+    ;;
+
   list)
     while read -r i; do
       [ -f "$(instance_dir "$i")/.env" ] || continue
@@ -731,5 +927,5 @@ EOF
     ;;
 
   -h|--help) sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d; s/^# \{0,1\}//' ;;
-  *) die "unknown action '$action' (add|gis|to-pgsql|list|pack|export|import|delete)" ;;
+  *) die "unknown action '$action' (add|gis|to-pgsql|optimize-images|list|pack|export|import|delete)" ;;
 esac

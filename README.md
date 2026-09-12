@@ -54,6 +54,7 @@ bdus status
 | restore prod (latest) | `bdus restore prod` |
 | add an app | `bdus app add prod --name X --engine pgsql --email …` |
 | convert sqlite app to pgsql | `bdus app to-pgsql prod X` |
+| shrink/re-encode an app's images | `bdus app optimize-images prod X` |
 | list apps | `bdus app list` |
 | bundle a sqlite app folder for another server (laptop) | `bdus app pack ./X` → `scp` → `bdus app import` |
 | psql into prod | `bdus psql prod siti_scavo` |
@@ -637,6 +638,39 @@ once** — a freshly built native schema always shows a full pending-migrations
 list on first login (`POST /api/upgrade/minor` resolves it); this is normal
 bootstrap behavior for any new app, not specific to this command, but easy
 to mistake for something having gone wrong.
+
+### `bdus app optimize-images <instance> <app> [--max-size N] [--dpi N] [--quality N] [--out jpg|webp] [--yes] [--no-backup]`
+
+Re-encodes every raster row in an app's `bdus_files` table to a consistent
+size/format/quality. Candidates are `jpg`/`jpeg`/`png`/`bmp`/`tif`/`tiff`/`webp`
+rows (matched case-insensitively) — **GIFs, PDFs and SVGs are never selected**,
+vector or not.
+
+1. Exports a safety copy first (skip with `--no-backup`), then asks you to
+   confirm (skip with `--yes`) — this recompresses in place and is lossy.
+2. Lists candidates straight out of `bdus_files` (one `psql`/PDO query).
+3. Converts every candidate in **one throwaway `alpine` + ImageMagick
+   container** run against the instance's own `data/projects/<app>/files`
+   bind mount — not the `api` image, which only carries GD (no TIFF decode
+   support) — so there's nothing to rebuild or redeploy. For each file:
+   - shrink-only resize to fit `--max-size` x `--max-size` (aspect preserved —
+     same box semantics as the app's own upload-time resizer)
+   - a multi-page source (e.g. a scanned tif) is **flattened** to one frame
+     first (`-flatten`, composited with a transparent background so a
+     single-page source is unaffected)
+   - re-encoded as `--out` (`jpg` or `webp`, default `webp`) at `--quality`
+     (default 85), tagged `--dpi` (default 72 — metadata only, no resampling)
+   - alpha is kept for `webp`; for `jpg`, which has no alpha channel, it's
+     composited onto **white**
+   - the old physical file is deleted (or, if the extension didn't change,
+     simply overwritten)
+4. Restores `www-data` ownership on `files/` (the alpine container wrote as
+   root), then updates `bdus_files.ext` — in one batched statement, not one
+   `UPDATE` per row — only for rows whose extension actually changed.
+
+Failures (e.g. a `bdus_files` row with no physical file on disk) are reported
+per file and left untouched; nothing else in the run is aborted by one bad
+row. No restart.
 
 ### `bdus app list [instance|all]`
 
