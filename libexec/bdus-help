@@ -35,6 +35,9 @@ Applications
                           [--gis] [--gis-write]   (pgsql: provision PostGIS/Martin/QGIS roles too)
   app gis    <instance> <app> [--write]   add/retrofit PostGIS + Martin/QGIS roles on an existing app
   app to-pgsql <instance> <app> [--yes]   convert a live sqlite app to pgsql in place (pgloader)
+  app optimize-images <instance> <app> [--max-size N] [--dpi N] [--quality N] [--out jpg|webp]
+                          resize/re-encode every raster image in bdus_files (GIFs/PDFs/SVGs
+                          untouched) — exports a safety copy first, asks to confirm
   app list   [inst|all]
   app export <instance> <app> [--out FILE]      one portable archive (tree + pg_dump)
   app pack   <dir> [--name <slug>] [--out FILE]   same archive from a plain sqlite app folder
