@@ -13,7 +13,7 @@
 # otherwise:  sudo install -o debian -g debian -m 0644 /dev/null /var/log/bdus-backup.log
 
 SHELL=/bin/bash
-15 2 * * *  debian  /usr/local/bin/bdus backup all  >> /var/log/bdus-backup.log 2>&1
+15 2 * * *  debian  /usr/local/bin/bdus backup all --reason cron  >> /var/log/bdus-backup.log 2>&1
 # weekly integrity check of every repo (5% data read)
 # 40 3 * * 0  debian  /usr/local/bin/bdus backup verify all  >> /var/log/bdus-backup.log 2>&1
 # optional heartbeat: mail yourself if anything is wrong
