@@ -506,9 +506,13 @@ EOF
 
     # 1 — candidate rows: raster images only; gif/svg/pdf/anything else is never selected
     info "listing candidate images in '$app' ($eng)…"
+    # match case-insensitively (ext can be stored mixed/upper-case, e.g. from
+    # v4 imports) but emit the ORIGINAL casing: the physical filename on disk
+    # is "$id.$ext" as stored, and on the case-sensitive filesystem inside the
+    # container "$id.jpg" won't resolve to an actual "$id.JPG".
     if [ "$eng" = pgsql ]; then
       dc "$inst" exec -T postgres psql -U "$dbuser" -d "$dbname" -tAqc \
-        "SELECT id::text || chr(9) || lower(ext) FROM bdus_files WHERE lower(ext) IN ('jpg','jpeg','png','bmp','tif','tiff','webp')" \
+        "SELECT id::text || chr(9) || ext FROM bdus_files WHERE lower(ext) IN ('jpg','jpeg','png','bmp','tif','tiff','webp')" \
         | grep -v '^$' > "$work/candidates.tsv" || true
     else
       dc "$inst" exec -T -e A="$app" api php -r '
@@ -517,7 +521,7 @@ EOF
         $ph = implode(",", array_fill(0, count($exts), "?"));
         $stmt = $db->prepare("SELECT id, ext FROM bdus_files WHERE lower(ext) IN ($ph)");
         $stmt->execute($exts);
-        foreach ($stmt as $row) { echo $row["id"]."\t".strtolower($row["ext"])."\n"; }
+        foreach ($stmt as $row) { echo $row["id"]."\t".$row["ext"]."\n"; }
       ' > "$work/candidates.tsv"
     fi
 
