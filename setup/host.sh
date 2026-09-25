@@ -100,6 +100,15 @@ if [ -n "$USR" ] && [ ! -e /var/log/bdus-backup.log ]; then
   grn "/var/log/bdus-backup.log ready (owner $USR)"
 fi
 
+# ── cron: some minimal base images don't ship it, and /etc/cron.d entries
+# then sit there silently doing nothing (no service, no error, no log line —
+# `systemctl status cron` just says "could not be found"). Install + enable
+# it so etc/cron.d/bdus-backup (copied in separately, see its own header) can
+# actually fire.
+systemctl list-unit-files cron.service >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq cron; }
+systemctl enable --now cron >/dev/null 2>&1 || true
+grn "cron enabled"
+
 # ── ufw: host services (does NOT cover Docker-published ports) ─────────────
 if [ "$DO_UFW" -eq 1 ]; then
   command -v ufw >/dev/null || { apt-get update -qq && apt-get install -y -qq ufw; }
