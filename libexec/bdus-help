@@ -18,6 +18,8 @@ Instances
   status                  one-screen health of every instance (exit != 0 if anything is wrong)
   update <inst|all> <ver> pull & switch to <ver>: checks the tag exists on GHCR, backs up
                           prod first, verifies the instance comes back, reverts the pin if not
+  tags [--latest N]       latest release tag(s) of BraDypUS on GitHub, newest first (default 1) —
+                          so you don't mistype the version for `update` (`bdus update all $(bdus tags)`)
   start | stop | restart <inst|all>
   pull <inst|all>         pre-fetch images without restarting
   logs <instance> [...]   docker compose logs, passthrough

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# bdus tags [--latest N]
+#   Latest release tags of the BraDypUS repo on GitHub (default: 1), newest
+#   first, as bare X.Y.Z — paste straight into `bdus update <inst|all> <ver>`.
+#   Plain tags go to stdout, so `bdus update all $(bdus tags)` works.
+set -euo pipefail
+. "$BDUS_OPS_DIR/lib/common.sh"
+
+: "${BDUS_REPO_URL:=https://github.com/lad-sapienza/BraDypUS.git}"
+
+n=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --latest|-n) [ $# -ge 2 ] || die "$1 needs a number"; n="$2"; shift 2 ;;
+    --latest=*)  n="${1#*=}"; shift ;;
+    -h|--help)   sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)           die "usage: bdus tags [--latest N]" ;;
+  esac
+done
+[[ "$n" =~ ^[1-9][0-9]*$ ]] || die "--latest needs a positive number (got '$n')"
+
+out="$(git ls-remote --tags --refs --sort=-v:refname "$BDUS_REPO_URL" 2>/dev/null)" \
+  || die "could not reach $BDUS_REPO_URL"
+
+tags="$(printf '%s\n' "$out" | sed -n 's#.*refs/tags/v\{0,1\}##p' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -n "$n" || true)"
+[ -n "$tags" ] || die "no X.Y.Z tags found on $BDUS_REPO_URL"
+printf '%s\n' "$tags"

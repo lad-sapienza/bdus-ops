@@ -50,7 +50,7 @@ bdus status
 | health of everything | `bdus status` |
 | tail logs | `bdus logs prod -f` |
 | back up now | `bdus backup all` |
-| new release 5.4.8 | `bdus update all 5.4.8` |
+| new release 5.4.8 | `bdus tags` → `bdus update all 5.4.8` |
 | restore prod (latest) | `bdus restore prod` |
 | add an app | `bdus app add prod --name X --engine pgsql --email …` |
 | convert sqlite app to pgsql | `bdus app to-pgsql prod X` |
@@ -430,6 +430,13 @@ backup and its age. Warns when the running api image does not match the `.env`
 pin. **Exit `1`** if any container is not running, health fails, Postgres or
 Martin fails, or the newest backup is older than `STALE_BACKUP_DAYS`. Suitable
 for a cron heartbeat.
+
+### `bdus tags [--latest N]`
+
+Prints the newest `X.Y.Z` release tag(s) of the BraDypUS repo (`git ls-remote`
+on GitHub, no token needed; override with `BDUS_REPO_URL`), newest first —
+default 1, `--latest 5` for the last five. Output is bare versions on stdout,
+so `bdus update all $(bdus tags)` can't be mistyped.
 
 ### `bdus update <instance|all> <X.Y.Z> [--yes] [--no-backup]`
 
