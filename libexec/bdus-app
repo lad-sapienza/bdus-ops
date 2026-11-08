@@ -4,6 +4,7 @@
 # bdus app to-pgsql  <instance> <app> [--yes]
 # bdus app optimize-images <instance> <app> [--max-size N] [--dpi N] [--quality N] [--out jpg|webp] [--yes] [--no-backup]
 # bdus app list      [instance|all]
+# bdus app upgrade   [instance|all] [--dry-run]
 # bdus app export    <instance> <app> [--out FILE]
 # bdus app pack      <dir> [--name <slug>] [--out FILE]        # dev machine: folder → *.bdusapp.tgz (sqlite)
 # bdus app import    <instance> <archive> [--force] [--new-jwt]
@@ -51,6 +52,18 @@
 #          ownership. Exports a safety copy first (skip with --no-backup) and
 #          asks to confirm (skip with --yes): this recompresses in place and
 #          is not reversible.
+# upgrade — applies the pending MINOR migrations of every app of the instance
+#          (bin/upgrade-app.php in the api container, as www-data). After a
+#          release with new migrations an app stays "upgrade pending" until an
+#          admin logs in, and ordinary users cannot enter; `bdus update` does
+#          this for you (skip with --no-migrate). One failing app does not stop
+#          the others; its error is also in that app's own log (bdus_log).
+#          --dry-run lists what is pending and changes nothing. No backup is
+#          taken here (`bdus update` already did): run `bdus backup` first when
+#          calling it by hand. Never runs the MAJOR (v4 → v5) upgrade: such an
+#          app is reported and left to an administrator at login.
+#          Exit 0 ok · 1 an app failed · 3 an app needs the major upgrade · 4 the
+#          running api image is older than bin/upgrade-app.php.
 # export — one portable archive of a single app, into <instance>/exports/:
 #          a single tar.gz with the projects/<app>/ tree at the top and, for a
 #          pgsql app, a `db.dump` (pg_dump -Fc) beside it. No manifest — the
@@ -194,7 +207,7 @@ fi
 
 . "$BDUS_OPS_DIR/lib/common.sh"
 
-action="${1:?usage: bdus app add|gis|to-pgsql|list|pack|export|import|delete ...}"; shift || true
+action="${1:?usage: bdus app add|gis|to-pgsql|list|upgrade|pack|export|import|delete ...}"; shift || true
 
 # read four config.json fields of an app inside an instance's api container:
 # engine, db_name, db_username, db_password  (one per line, may be empty)
@@ -671,6 +684,29 @@ SCRIPT
         done
       ' 2>/dev/null || warn "  ($i not running)"
     done < <(resolve_instances "${1:-all}")
+    ;;
+
+  upgrade)
+    dry=() target=""
+    while [ $# -gt 0 ]; do case "$1" in
+      --dry-run) dry=(--dry-run); shift ;;
+      -*)        die "unknown option: $1" ;;
+      *)         [ -z "$target" ] || die "extra argument: $1"; target="$1"; shift ;;
+    esac; done
+    worst=0
+    while read -r i; do
+      [ -f "$(instance_dir "$i")/.env" ] || continue
+      info "$i"
+      urc=0; upgrade_apps "$i" ${dry[@]+"${dry[@]}"} || urc=$?
+      case "$urc" in
+        0) : ;;
+        4) warn "  $i: this api image has no bin/upgrade-app.php (update to a newer release first)"; urc=1 ;;
+        *) : ;;
+      esac
+      # keep the most severe: failure (1) beats needs-major (3) beats ok
+      if [ "$urc" -eq 1 ] || { [ "$urc" -ne 0 ] && [ "$worst" -eq 0 ]; }; then worst="$urc"; fi
+    done < <(resolve_instances "${target:-all}")
+    exit "$worst"
     ;;
 
   export)

@@ -44,6 +44,15 @@ for i in $INSTANCES; do
     else bad "  postgres  not ready"; rc=1; fi
   fi
 
+  # apps with pending migrations (users cannot enter until an admin upgrades them)
+  if command -v jq >/dev/null 2>&1; then
+    pj="$(dc "$i" exec -T -u www-data api php bin/upgrade-app.php --all --dry-run --json 2>/dev/null || true)"
+    pn="$(printf '%s' "$pj" | jq -r '[.results[]? | select(.state=="pending") | .app] | join(", ")' 2>/dev/null || true)"
+    pm="$(printf '%s' "$pj" | jq -r '[.results[]? | select(.state=="needs-major") | .app] | join(", ")' 2>/dev/null || true)"
+    [ -z "$pn" ] || warn "  apps    upgrade pending: $pn — run: bdus app upgrade $i"
+    [ -z "$pm" ] || warn "  apps    need the MAJOR upgrade (admin at login): $pm"
+  fi
+
   # martin
   if instance_has_martin "$i"; then
     if dc "$i" exec -T martin wget -q -O /dev/null http://localhost:3000/health >/dev/null 2>&1; then

@@ -199,6 +199,20 @@ image_tag_exists() {   # image_tag_exists <image> <tag>
   docker manifest inspect "$1:$2" >/dev/null 2>&1
 }
 
+# ── application upgrades ────────────────────────────────────────────────────
+# Apply (or, with --dry-run, only list) the pending MINOR migrations of every app
+# of an instance, via bin/upgrade-app.php in its api container (as www-data).
+# Without this an app stays "upgrade pending" until an administrator logs in, and
+# until then ordinary users cannot enter. Never runs a major (v4 → v5) upgrade.
+# Output goes to stderr. Returns the script's exit code:
+#   0 ok · 1 some app failed · 3 some app needs the major upgrade (skipped)
+#   4 the running api image predates bin/upgrade-app.php (nothing was run)
+upgrade_apps() {   # upgrade_apps <instance> [--dry-run]
+  local i="$1"; shift
+  dc "$i" exec -T api test -f bin/upgrade-app.php 2>/dev/null || return 4
+  dc "$i" exec -T -u www-data api php bin/upgrade-app.php --all "$@" >&2
+}
+
 valid_semver() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 
 # ── secrets ─────────────────────────────────────────────────────────────────

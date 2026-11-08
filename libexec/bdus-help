@@ -17,7 +17,8 @@ Instances
                           (bradypus.yml + .env + bdus.override.yml), pull, up, wait healthy
   status                  one-screen health of every instance (exit != 0 if anything is wrong)
   update <inst|all> <ver> pull & switch to <ver>: checks the tag exists on GHCR, backs up
-                          prod first, verifies the instance comes back, reverts the pin if not
+                          prod first, verifies the instance comes back, reverts the pin if not,
+                          then upgrades every app's schema (--no-migrate to skip)
   tags [--latest N]       latest release tag(s) of BraDypUS on GitHub, newest first (default 1) —
                           so you don't mistype the version for `update` (`bdus update all $(bdus tags)`)
   start | stop | restart <inst|all>
@@ -41,6 +42,8 @@ Applications
                           resize/re-encode every raster image in bdus_files (GIFs/PDFs/SVGs
                           untouched) — exports a safety copy first, asks to confirm
   app list   [inst|all]
+  app upgrade [inst|all] [--dry-run]   apply pending minor migrations of every app (no admin login
+                          needed; `update` already does it — skip with --no-migrate)
   app export <instance> <app> [--out FILE]      one portable archive (tree + pg_dump)
   app pack   <dir> [--name <slug>] [--out FILE]   same archive from a plain sqlite app folder
                           (dev machine: no config.env/instance/Docker) — feed to `app import`

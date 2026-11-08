@@ -50,7 +50,8 @@ bdus status
 | health of everything | `bdus status` |
 | tail logs | `bdus logs prod -f` |
 | back up now | `bdus backup all` |
-| new release 5.4.8 | `bdus tags` → `bdus update all 5.4.8` |
+| new release 5.4.8 | `bdus tags` → `bdus update all 5.4.8` (also upgrades every app) |
+| apps waiting for an upgrade | `bdus app upgrade prod --dry-run` → `bdus app upgrade prod` |
 | restore prod (latest) | `bdus restore prod` |
 | add an app | `bdus app add prod --name X --engine pgsql --email …` |
 | convert sqlite app to pgsql | `bdus app to-pgsql prod X` |
@@ -121,8 +122,13 @@ cost roughly one full copy plus the daily deltas.
 ```bash
 bdus update all 5.4.9           # verifies the tag on GHCR, backs up each instance first
                                 #   (tagged reason:pre-update_<from>-to-<to>), bumps the pin,
-                                #   pull + up -d, polls health, reverts the pin on failure
+                                #   pull + up -d, polls health, reverts the pin on failure,
+                                #   then upgrades every app (pending migrations)
 ```
+
+Apps are upgraded as part of the update, with no administrator involved. To see
+what is pending, or to redo it by hand: `bdus app upgrade prod --dry-run`,
+`bdus app upgrade prod`.
 
 The pin reverts on failure but the DB does not (migrations may have run) — roll
 back with:
@@ -429,7 +435,8 @@ Postgres `pg_isready`, Martin `/health` (if enabled), newest `*-files-*.tar.gz`
 backup and its age. Warns when the running api image does not match the `.env`
 pin. **Exit `1`** if any container is not running, health fails, Postgres or
 Martin fails, or the newest backup is older than `STALE_BACKUP_DAYS`. Suitable
-for a cron heartbeat.
+for a cron heartbeat. Also warns (exit code unchanged) when an app has an
+upgrade pending (`bdus app upgrade <instance>`) or needs the major upgrade.
 
 ### `bdus tags [--latest N]`
 
@@ -438,7 +445,7 @@ on GitHub, no token needed; override with `BDUS_REPO_URL`), newest first —
 default 1, `--latest 5` for the last five. Output is bare versions on stdout,
 so `bdus update all $(bdus tags)` can't be mistyped.
 
-### `bdus update <instance|all> <X.Y.Z> [--yes] [--no-backup]`
+### `bdus update <instance|all> <X.Y.Z> [--yes] [--no-backup] [--no-migrate]`
 
 1. Aborts unless `API_IMAGE:<ver>` **and** `APP_IMAGE:<ver>` exist on GHCR
    (`docker manifest inspect`).
@@ -450,11 +457,18 @@ so `bdus update all $(bdus tags)` can't be mistyped.
    - **on failure**: restore the previous `.env` pin, `up -d`, and stop with a
      non-zero exit. The DB is *not* rolled back — migrations for the new version
      may already have run; check the backup.
+   - once healthy, **upgrade the apps**: `bdus app upgrade <instance>` (skip with
+     `--no-migrate`). If an app fails, the run stops after this instance — the
+     next one (`prod` after `demo`) is not touched — and says which app; the
+     failure is also in that app's own log. An app that needs the **major**
+     upgrade (v4 → v5) is only reported.
 3. `--yes` skips the confirmation asked before every instance (all but the first
    when the target is `all`).
 
-A version bump runs the DB **migrations** on the first request after it —
-that's exactly why the backup above happens *before* `up -d`, automatically.
+A release can add DB **migrations**. Without the step above an app stays
+"upgrade pending" until an administrator logs in and confirms, and until then
+ordinary users cannot enter. That is why the backup above happens *before*
+`up -d`, and why the migrations run only after it.
 
 ### `bdus backup [instance|all] [--reason TXT] [--prune|--no-prune]`
 
@@ -683,6 +697,26 @@ row. No restart.
 
 Lists `projects/*` in each instance with engine and (pgsql) database name, read
 from each app's `config.json`.
+
+### `bdus app upgrade [instance|all] [--dry-run]`
+
+Applies the pending **minor** migrations of every app of the instance, with no
+login: it runs `php bin/upgrade-app.php --all` as `www-data` in the api
+container (the same code as the admin's "Upgrade" button). `bdus update` calls
+it for you after the new version is healthy.
+
+- One line per app: `up-to-date`, `upgraded (n)`, `pending (n)` (dry run),
+  `needs-major` or `failed: <reason>`. One failing app does not stop the others;
+  the error is also written to that app's own log (`bdus_log`).
+- `--dry-run` lists what is pending and changes nothing (`bdus status` uses it).
+- It never runs the **major** upgrade (v4 → v5): that needs a super admin, a
+  snapshot and the verification; such an app is reported and left to an
+  administrator at login.
+- It takes **no backup**: `bdus update` already did. Run `bdus backup <instance>`
+  first when you call it by hand.
+- **Exit** `0` ok · `1` an app failed · `3` an app needs the major upgrade · `4`
+  the running api image is older than `bin/upgrade-app.php` (first shipped after 5.20.0: update
+  first).
 
 ### `bdus app export <instance> <app> [--out FILE]`
 
