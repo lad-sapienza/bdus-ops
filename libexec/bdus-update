@@ -35,7 +35,8 @@ image_tag_exists "$APP_IMAGE" "$ver" || die "$APP_IMAGE:$ver not found on GHCR"
 ok "both images present"
 
 first=1
-while read -r i; do
+# list on fd 3: nothing run inside the loop can consume it through stdin
+while read -r i <&3; do
   cur="$(instance_version "$i" || true)"
   if [ "$cur" = "$ver" ]; then info "$i already on $ver — skip"; first=0; continue; fi
 
@@ -76,4 +77,4 @@ while read -r i; do
     die "$i reverted to $cur. The DB may have run migrations for $ver — inspect and restore from backup if needed."
   fi
   first=0
-done < <(resolve_instances "$target")
+done 3< <(resolve_instances "$target")

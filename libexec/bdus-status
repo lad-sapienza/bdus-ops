@@ -46,7 +46,7 @@ for i in $INSTANCES; do
 
   # apps with pending migrations (users cannot enter until an admin upgrades them)
   if command -v jq >/dev/null 2>&1; then
-    pj="$(dc "$i" exec -T -u www-data api php bin/upgrade-app.php --all --dry-run --json 2>/dev/null || true)"
+    pj="$(dc "$i" exec -T -u www-data api php bin/upgrade-app.php --all --dry-run --json 2>/dev/null </dev/null || true)"
     pn="$(printf '%s' "$pj" | jq -r '[.results[]? | select(.state=="pending") | .app] | join(", ")' 2>/dev/null || true)"
     pm="$(printf '%s' "$pj" | jq -r '[.results[]? | select(.state=="needs-major") | .app] | join(", ")' 2>/dev/null || true)"
     [ -z "$pn" ] || warn "  apps    upgrade pending: $pn — run: bdus app upgrade $i"

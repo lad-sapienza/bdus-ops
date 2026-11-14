@@ -209,8 +209,10 @@ image_tag_exists() {   # image_tag_exists <image> <tag>
 #   4 the running api image predates bin/upgrade-app.php (nothing was run)
 upgrade_apps() {   # upgrade_apps <instance> [--dry-run]
   local i="$1"; shift
-  dc "$i" exec -T api test -f bin/upgrade-app.php 2>/dev/null || return 4
-  dc "$i" exec -T -u www-data api php bin/upgrade-app.php --all "$@" >&2
+  # </dev/null: `compose exec -T` reads stdin, which would swallow the rest of the
+  # caller's `while read` list of instances (bdus update all skipped the 2nd one).
+  dc "$i" exec -T api test -f bin/upgrade-app.php 2>/dev/null </dev/null || return 4
+  dc "$i" exec -T -u www-data api php bin/upgrade-app.php --all "$@" >&2 </dev/null
 }
 
 valid_semver() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
