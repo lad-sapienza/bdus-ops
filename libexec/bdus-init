@@ -46,6 +46,7 @@ port="$(cfg_instance "$inst" PORT)"
 pg="$(cfg_instance "$inst" POSTGRES)"
 allow="$(cfg_instance "$inst" ALLOW_NEW_APP)"
 cors="$(cfg_instance "$inst" CORS_ORIGIN)"
+trusted="$(cfg_instance "$inst" TRUSTED_PROXIES)"
 mem_api="$(cfg_instance "$inst" MEM_API)"
 mem_front="$(cfg_instance "$inst" MEM_FRONT)"
 martin="$(cfg_instance "$inst" MARTIN)"
@@ -212,6 +213,14 @@ EOF
   # value can't trip YAML; `dc config` below still validates the result.
   if [ -n "$cors" ]; then
     printf '      - "BRADYPUS_CORS_ORIGIN=%s"\n' "$cors"
+  fi
+  # BRADYPUS_TRUSTED_PROXIES (proxies whose X-Forwarded-For the API believes, for
+  # its per-address rate limits) — emitted only when INSTANCE_<n>_TRUSTED_PROXIES
+  # is set. When unset, bradypus.yml's default applies: the private ranges, which
+  # covers the frontend container and an outer proxy on the LAN, so nothing to
+  # configure for the usual setup. Baked in literally, like CORS_ORIGIN.
+  if [ -n "$trusted" ]; then
+    printf '      - "BRADYPUS_TRUSTED_PROXIES=%s"\n' "$trusted"
   fi
   cat <<EOF
     security_opt:

@@ -288,7 +288,8 @@ Creates `$BDUS_ROOT/<instance>/` from the `INSTANCE_<instance>_*` keys in
   TLS, see below); for a Martin instance, `MARTIN_PORT`
 - writes `bdus.override.yml` (env passthrough, `no-new-privileges`, `mem_limit`,
   the bind mounts above, the optional `BRADYPUS_CORS_ORIGIN` from
-  `INSTANCE_<n>_CORS_ORIGIN`, and — when `INSTANCE_<n>_POSTGRES=1` — a
+  `INSTANCE_<n>_CORS_ORIGIN`, the optional `BRADYPUS_TRUSTED_PROXIES` from
+  `INSTANCE_<n>_TRUSTED_PROXIES`, and — when `INSTANCE_<n>_POSTGRES=1` — a
   `postgis/postgis:16-3.4-alpine` service instead of plain `postgres`; any
   database can `CREATE EXTENSION postgis` or not, at no cost either way)
 - when `INSTANCE_<n>_MARTIN=1` (requires `POSTGRES=1`): adds the `martin`
@@ -877,6 +878,7 @@ to open that same catalog file — it would have caught this immediately.
 | `INSTANCE_<n>_POSTGRES` | `1` adds a shared Postgres (PostGIS-enabled) service, `0` sqlite only |
 | `INSTANCE_<n>_ALLOW_NEW_APP` | `0` (prod) or `1` (demo/edu) |
 | `INSTANCE_<n>_CORS_ORIGIN` | optional: sets the API's `BRADYPUS_CORS_ORIGIN` — one or more allowed origins, **space-separated** (exact match, no wildcard). Quote it in `config.env` when it contains a space. Empty (default) leaves it unset (no CORS headers). Baked into `bdus.override.yml`, so a plain `bdus init <instance>` re-run picks up a change |
+| `INSTANCE_<n>_TRUSTED_PROXIES` | optional: sets the API's `BRADYPUS_TRUSTED_PROXIES` — comma-separated IPs / IPv4 CIDRs of the proxies in front of the API, whose `X-Forwarded-For` is believed for the per-address **rate limits** (API keys, failed logins; HTTP 429). Empty (default) keeps the private ranges set by `bradypus.yml` (`10/8`, `172.16/12`, `192.168/16`), which cover the frontend container and a proxy VM on the LAN — no manual step. The outer nginx must send `X-Forwarded-For $proxy_add_x_forwarded_for`. Baked into `bdus.override.yml` |
 | `INSTANCE_<n>_MEM_API` / `_MEM_FRONT` | container memory limits |
 | `INSTANCE_<n>_MARTIN` | `1` adds a Martin (vector tile) service — requires `POSTGRES=1` |
 | `INSTANCE_<n>_MARTIN_PORT` | `<ip>:<port>` bind for Martin (only used when `MARTIN=1`) |
@@ -956,6 +958,7 @@ server {
     location / {
         proxy_pass http://192.168.4.39:$3;
         proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
     }
 }
