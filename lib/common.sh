@@ -19,9 +19,16 @@ bad()  { printf '%s✗%s %s\n' "$_r" "$_z" "$*" >&2; }
 die()  { printf '%sERROR%s %s\n' "$_r" "$_z" "$*" >&2; exit 1; }
 
 confirm() {   # confirm "question?"  → 0 on y/Y
-  local a
+  local a=""
   printf '%s [y/N] ' "$1" >&2
-  read -r a </dev/tty 2>/dev/null || read -r a || true
+  # { …; } 2>/dev/null: the shell reports a failed </dev/tty redirection itself,
+  # before a per-command 2>/dev/null would apply.
+  if { read -r a </dev/tty; } 2>/dev/null; then :
+  elif [ -t 0 ]; then read -r a || true
+  else
+    printf '\n' >&2
+    die "no terminal to ask on — re-run with --yes (or from an interactive ssh -t session)"
+  fi
   [[ "$a" == [yY] ]]
 }
 
