@@ -153,6 +153,14 @@ if [ "$ENGINE" = pgsql ]; then
     su_psql -c "GRANT  CONNECT ON DATABASE \"$DBNAME\" TO \"$DBUSER\""
     green "database '$DBNAME' created (owner $DBUSER; PUBLIC CONNECT revoked)"
   fi
+  # accent-insensitive text search (BRADYPUS_ACCENT_INSENSITIVE) needs `unaccent`;
+  # creating an extension takes the superuser, so it is done here, not by the app
+  if docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$DBNAME" -v ON_ERROR_STOP=1 -q \
+       -c "CREATE EXTENSION IF NOT EXISTS unaccent" >/dev/null 2>&1; then
+    green "extension unaccent ready in '$DBNAME'"
+  else
+    cyan "could not enable the unaccent extension in '$DBNAME' — text search stays accent-sensitive (bdus app unaccent)"
+  fi
 fi
 
 # ── run the CLI inside the api container ───────────────────────────────────

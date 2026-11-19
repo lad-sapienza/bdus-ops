@@ -47,6 +47,9 @@ pg="$(cfg_instance "$inst" POSTGRES)"
 allow="$(cfg_instance "$inst" ALLOW_NEW_APP)"
 cors="$(cfg_instance "$inst" CORS_ORIGIN)"
 trusted="$(cfg_instance "$inst" TRUSTED_PROXIES)"
+accent="$(cfg_instance "$inst" ACCENT_INSENSITIVE)"
+# default: on for instances with Postgres (where `bdus app add` enables unaccent), off otherwise
+[ -n "$accent" ] || { [ "$pg" = 1 ] && accent=1 || accent=0; }
 mem_api="$(cfg_instance "$inst" MEM_API)"
 mem_front="$(cfg_instance "$inst" MEM_FRONT)"
 martin="$(cfg_instance "$inst" MARTIN)"
@@ -221,6 +224,12 @@ EOF
   # configure for the usual setup. Baked in literally, like CORS_ORIGIN.
   if [ -n "$trusted" ]; then
     printf '      - "BRADYPUS_TRUSTED_PROXIES=%s"\n' "$trusted"
+  fi
+  # BRADYPUS_ACCENT_INSENSITIVE (text search ignores accents: SQLite through PHP intl,
+  # PostgreSQL through the unaccent extension) — emitted when INSTANCE_<n>_ACCENT_INSENSITIVE=1,
+  # or unset on an instance with Postgres. Baked in, like CORS_ORIGIN.
+  if [ "$accent" = 1 ]; then
+    printf '      - "BRADYPUS_ACCENT_INSENSITIVE=1"\n'
   fi
   cat <<EOF
     security_opt:

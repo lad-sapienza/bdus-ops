@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # bdus app add       <instance> --name <slug> --engine sqlite|pgsql --email <admin> [--db-name X] [--db-user R] [--password-stdin] [--gis] [--gis-write]
 # bdus app gis       <instance> <app> [--write]
+# bdus app unaccent  <instance> [app]
 # bdus app to-pgsql  <instance> <app> [--yes]
 # bdus app optimize-images <instance> <app> [--max-size N] [--dpi N] [--quality N] [--out jpg|webp] [--yes] [--no-backup]
 # bdus app list      [instance|all]
@@ -25,6 +26,11 @@
 #          Martin actually serves tiles is still a manual edit (README.md,
 #          "Vector tiles (Martin)") — not automated, since it's a
 #          hand-maintained file.
+# unaccent — enables the PostgreSQL `unaccent` extension in a pgsql app's database (every
+#          pgsql app of the instance when <app> is omitted). Idempotent. It is what lets the API
+#          ignore accents in text search (BRADYPUS_ACCENT_INSENSITIVE, on by default for instances
+#          with Postgres): `bdus app add` and `import` already do it for new apps, this is for the
+#          ones created before.
 # to-pgsql — converts a live sqlite app to pgsql in place (same name, same
 #          URL): renames projects/<app> aside, builds a fresh pgsql app under
 #          the same name for its native schema (bdus app add's own DDL —
@@ -207,7 +213,7 @@ fi
 
 . "$BDUS_OPS_DIR/lib/common.sh"
 
-action="${1:?usage: bdus app add|gis|to-pgsql|list|upgrade|pack|export|import|delete ...}"; shift || true
+action="${1:?usage: bdus app add|gis|unaccent|to-pgsql|list|upgrade|pack|export|import|delete ...}"; shift || true
 
 # read four config.json fields of an app inside an instance's api container:
 # engine, db_name, db_username, db_password  (one per line, may be empty)
@@ -218,6 +224,15 @@ app_cfg() {   # app_cfg <instance> <app>
     if (!is_array($c)) exit(3);
     echo ($c["db_engine"]??"")."\n".($c["db_name"]??"")."\n".($c["db_username"]??"")."\n".($c["db_password"]??"")."\n";
   ' 2>/dev/null
+}
+
+# CREATE EXTENSION unaccent in a pgsql app's database (as the Postgres superuser; idempotent)
+unaccent_enable() {   # unaccent_enable <instance> <dbname>
+  local su; su="$(env_get "$1" POSTGRES_USER)"
+  dc "$1" exec -T postgres psql -U "$su" -d "$2" -v ON_ERROR_STOP=1 -q \
+    -c "CREATE EXTENSION IF NOT EXISTS unaccent" \
+    && ok "  extension unaccent ready in '$2'" \
+    || warn "  could not enable unaccent in '$2' (accent-insensitive search stays off for this app)"
 }
 
 # read four gis-config.json fields (may not exist yet): martin_user,
@@ -362,6 +377,32 @@ case "$action" in
     instance_known "$inst" || die "unknown instance '$inst'"
     valid_app_name "$app" || die "bad app name '$app'"
     gis_enable "$inst" "$app" "$write"
+    ;;
+
+  unaccent)
+    inst="${1:?bdus app unaccent <instance> [app]}"; app="${2:-}"
+    instance_known "$inst" || die "unknown instance '$inst'"
+    instance_has_pg "$inst" || die "$inst has no Postgres service — enable INSTANCE_${inst}_POSTGRES=1 first"
+    if [ -n "$app" ]; then
+      valid_app_name "$app" || die "bad app name '$app'"
+      { read -r eng; read -r dbname; read -r _du; read -r _dp; } < <(app_cfg "$inst" "$app") || true
+      [ -n "$eng" ] || die "app '$app' not found on '$inst' (is it running?)"
+      [ "$eng" = pgsql ] || die "'$app' is a $eng app — unaccent applies to pgsql databases only"
+      unaccent_enable "$inst" "$dbname"
+    else
+      n=0
+      while read -r dbname; do
+        [ -n "$dbname" ] || continue
+        unaccent_enable "$inst" "$dbname"; n=$((n+1))
+      done < <(dc "$inst" exec -T api sh -lc '
+        for d in projects/*/; do
+          [ -f "$d/config.json" ] || continue
+          grep -q "\"db_engine\"[[:space:]]*:[[:space:]]*\"pgsql\"" "$d/config.json" || continue
+          sed -n "s/.*\"db_name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$d/config.json" | head -1
+        done
+      ' 2>/dev/null)
+      [ "$n" -gt 0 ] || info "no pgsql app on '$inst'"
+    fi
     ;;
 
   to-pgsql)
@@ -822,6 +863,7 @@ SCRIPT
           -c "GRANT  CONNECT ON DATABASE \"$dbname\" TO \"$dbuser\""
         ok "  database '$dbname' created (owner $dbuser)"
       fi
+      unaccent_enable "$inst" "$dbname"
 
       # gis/martin roles (if this app had them) — recreate with the SAME stored
       # password before restoring, so the dump's own GRANT statements (pg_dump
