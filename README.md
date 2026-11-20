@@ -826,6 +826,22 @@ Removes a single app. Irreversible.
 
 No restart.
 
+### `bdus cors list [instance|all]` · `add|remove <instance> <origin>... [--no-apply]`
+
+Manage the API's CORS allow-list (`BRADYPUS_CORS_ORIGIN`). In BraDypUS 5 CORS is
+**per instance, not per app**: it is one environment variable of the api container
+(read in `bdus-api/index.php`), so every app served by the instance shares the list.
+Origins are matched exactly — `scheme://host[:port]`, no path, no wildcard; input is
+lower-cased and a trailing `/` stripped, anything else is rejected.
+
+- `list` shows the origins in `config.env` and flags `init pending` when they differ
+  from what the generated `bdus.override.yml` currently carries.
+- `add` / `remove` (alias `rm`) rewrite `INSTANCE_<n>_CORS_ORIGIN` in `config.env`
+  (previous copy kept as `config.env.bak`), then run `bdus init <instance>` to bake it
+  into `bdus.override.yml` and recreate the api container. `--no-apply` only edits
+  `config.env`. Adding an origin already present, or removing one that isn't, is a
+  warning, not an error.
+
 ### `bdus logs <instance> [args…]`
 
 `cd <instance> && docker compose logs "$@"`. e.g. `bdus logs prod -f --tail=200`.

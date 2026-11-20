@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# bdus cors list   [instance|all]
+# bdus cors add    <instance> <origin>... [--no-apply]
+# bdus cors remove <instance> <origin>... [--no-apply]      (alias: rm)
+#
+# Manage the CORS allow-list of an instance's API (BRADYPUS_CORS_ORIGIN).
+#
+# CORS in BraDypUS 5 is per INSTANCE, not per app: it is one environment
+# variable of the api container (read in bdus-api/index.php), so every app
+# served by that instance shares the same list. Origins are matched exactly
+# (scheme://host[:port], no path, no wildcard).
+#
+# The list lives in config.env as INSTANCE_<instance>_CORS_ORIGIN (space-
+# separated). add/remove rewrite that line (the previous config.env is kept as
+# config.env.bak) and then run `bdus init <instance>` to bake it into
+# bdus.override.yml and recreate the api container. --no-apply only edits
+# config.env; run `bdus init <instance>` yourself afterwards.
+#
+# list shows, per instance, the origins in config.env and flags a difference
+# with what the generated bdus.override.yml currently has (= "init pending").
+set -euo pipefail
+# shellcheck disable=SC1091
+. "$BDUS_OPS_DIR/lib/common.sh"
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; }
+
+# normalise_origin <raw> → prints the origin to store, or dies.
+# Browsers send a lowercase scheme://host[:port] with no trailing slash, and the
+# API compares exactly, so anything else would never match.
+normalise_origin() {
+  local o; o="$(printf "%s" "$1" | tr "A-Z" "a-z")"
+  o="${o%/}"
+  [ "$o" != '*' ] || die "wildcard '*' is not supported (the API matches origins exactly)"
+  [[ "$o" =~ ^https?://(\[[0-9a-f:]+\]|[a-z0-9]([a-z0-9.-]*[a-z0-9])?)(:[0-9]{1,5})?$ ]] \
+    || die "invalid origin '$1' — expected scheme://host[:port], e.g. https://example.org (no path, no wildcard)"
+  printf '%s' "$o"
+}
+
+# live_origins <instance> → origins currently baked into bdus.override.yml
+live_origins() {
+  local f; f="$(instance_dir "$1")/bdus.override.yml"
+  [ -f "$f" ] || return 0
+  sed -n 's/^ *- "BRADYPUS_CORS_ORIGIN=\(.*\)"$/\1/p' "$f" | head -1
+}
+
+# write_config <instance> <space-separated origins>  — replace/insert the config.env line
+write_config() {
+  local inst="$1" value="$2" var="INSTANCE_${1}_CORS_ORIGIN" line tmp
+  if [ -n "$value" ]; then line="$var=\"$value\""; else line="$var="; fi
+  cp -p "$CONFIG_FILE" "$CONFIG_FILE.bak"
+  tmp="$(mktemp)"
+  # Sourcing keeps the LAST assignment, so edit the last one and drop earlier
+  # duplicates; with none, insert after the instance's last INSTANCE_<n>_ line,
+  # else append.
+  LINE="$line" VAR="$var" PFX="INSTANCE_${inst}_" awk '
+    function isvar(s) { return index(s, VAR "=") == 1 }
+    BEGIN { VAR = ENVIRON["VAR"]; PFX = ENVIRON["PFX"] }
+    { lines[NR] = $0 }
+    END {
+      lastvar = 0; lastpfx = 0
+      for (i = 1; i <= NR; i++) {
+        t = lines[i]; sub(/^[ \t]+/, "", t)
+        if (isvar(t)) lastvar = i
+        if (index(t, PFX) == 1) lastpfx = i
+      }
+      for (i = 1; i <= NR; i++) {
+        t = lines[i]; sub(/^[ \t]+/, "", t)
+        if (isvar(t)) { if (i == lastvar) print ENVIRON["LINE"]; continue }
+        print lines[i]
+        if (!lastvar && i == lastpfx) print ENVIRON["LINE"]
+      }
+      if (!lastvar && !lastpfx) print ENVIRON["LINE"]
+    }' "$CONFIG_FILE" >"$tmp"
+  cat "$tmp" >"$CONFIG_FILE"     # keep config.env's inode and mode
+  rm -f "$tmp"
+  # confirm the edit by re-sourcing it in a subshell
+  local got
+  got="$( . "$CONFIG_FILE"; var="$var"; printf '%s' "${!var:-}" )"
+  [ "$got" = "$value" ] || { cp -p "$CONFIG_FILE.bak" "$CONFIG_FILE"; die "could not update $CONFIG_FILE (restored the previous one)"; }
+}
+
+do_list() {
+  local inst cfg live rc=0
+  for inst in $(resolve_instances "${1:-all}"); do
+    cfg="$(cfg_instance "$inst" CORS_ORIGIN)"
+    live="$(live_origins "$inst")"
+    info "$inst  (applies to every app of this instance)"
+    if [ -z "$cfg" ]; then
+      say "  (none — no CORS headers; fine when frontend and API share an origin)"
+    else
+      printf '%s\n' $cfg | sed 's/^/  /' >&2
+    fi
+    if [ "$cfg" != "$live" ]; then
+      warn "  init pending: bdus.override.yml has '${live:-<unset>}' — run: bdus init $inst"
+      rc=0
+    fi
+  done
+  return $rc
+}
+
+do_change() {   # do_change add|remove <instance> <origin>... [--no-apply]
+  local action="$1"; shift
+  local inst="" apply=1 raw=() a
+  for a in "$@"; do
+    case "$a" in
+      --no-apply) apply=0 ;;
+      -h|--help)  usage; exit 0 ;;
+      -*)         die "unknown option: $a" ;;
+      *)          if [ -z "$inst" ]; then inst="$a"; else raw+=("$a"); fi ;;
+    esac
+  done
+  [ -n "$inst" ] && [ "${#raw[@]}" -gt 0 ] || { usage; exit 2; }
+  instance_known "$inst" || die "unknown instance '$inst' (config INSTANCES=\"$INSTANCES\")"
+
+  local current new=() changed=0 o have x
+  current="$(cfg_instance "$inst" CORS_ORIGIN)"
+  # shellcheck disable=SC2206
+  new=($current)
+  for a in "${raw[@]}"; do
+    o="$(normalise_origin "$a")"
+    have=0; for x in "${new[@]:-}"; do [ "$x" = "$o" ] && have=1; done
+    if [ "$action" = add ]; then
+      if [ "$have" = 1 ]; then warn "$o is already allowed on '$inst' — skipped"
+      else new+=("$o"); changed=1; ok "add $o"; fi
+    else
+      if [ "$have" = 0 ]; then warn "$o is not in '$inst''s list — skipped"
+      else
+        local keep=(); for x in "${new[@]}"; do [ "$x" = "$o" ] || keep+=("$x"); done
+        new=("${keep[@]:-}"); changed=1; ok "remove $o"
+      fi
+    fi
+  done
+  [ "$changed" = 1 ] || { say "nothing to change"; exit 0; }
+
+  write_config "$inst" "${new[*]:-}"
+  ok "config.env updated (previous copy: $CONFIG_FILE.bak)"
+  if [ "$apply" = 1 ]; then
+    info "applying: bdus init $inst"
+    "$BDUS_OPS_DIR/libexec/bdus-init" "$inst"
+  else
+    warn "not applied — run: bdus init $inst"
+  fi
+}
+
+sub="${1:-}"; [ $# -gt 0 ] && shift || true
+case "$sub" in
+  list|ls)       do_list "${1:-all}" ;;
+  add)           do_change add "$@" ;;
+  remove|rm)     do_change remove "$@" ;;
+  -h|--help|'')  usage; [ -n "$sub" ] || exit 2 ;;
+  *)             die "unknown subcommand '$sub' — bdus cors list|add|remove" ;;
+esac

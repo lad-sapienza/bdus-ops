@@ -50,6 +50,11 @@ Applications
   app import <instance> <archive> [--force] [--new-jwt]   the reverse, incl. into another instance
   app delete <instance> <app> [--yes] [--no-backup] [--keep-role]   exports first, then removes
 
+CORS (per instance — shared by all its apps)
+  cors list [inst|all]    allowed origins of the API (BRADYPUS_CORS_ORIGIN), flags `init pending`
+  cors add <instance> <origin>... [--no-apply]      e.g. https://myapp.github.io
+  cors remove <instance> <origin>... [--no-apply]   edits config.env, then runs `bdus init`
+
 Vector tiles (optional, per instance)
   INSTANCE_<n>_MARTIN=1 in config.env (+ _MARTIN_PORT) adds a Martin service for
   serving tiles from geodata kept outside BraDypUS (e.g. QGIS) — see `app gis` above
