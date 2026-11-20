@@ -229,8 +229,10 @@ app_cfg() {   # app_cfg <instance> <app>
 # CREATE EXTENSION unaccent in a pgsql app's database (as the Postgres superuser; idempotent)
 unaccent_enable() {   # unaccent_enable <instance> <dbname>
   local su; su="$(env_get "$1" POSTGRES_USER)"
+  # </dev/null: psql inherits stdin, and called inside `while read` it would swallow the
+  # rest of the list (only the first app got the extension)
   dc "$1" exec -T postgres psql -U "$su" -d "$2" -v ON_ERROR_STOP=1 -q \
-    -c "CREATE EXTENSION IF NOT EXISTS unaccent" \
+    -c "CREATE EXTENSION IF NOT EXISTS unaccent" </dev/null \
     && ok "  extension unaccent ready in '$2'" \
     || warn "  could not enable unaccent in '$2' (accent-insensitive search stays off for this app)"
 }
