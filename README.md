@@ -214,7 +214,7 @@ errors, `1` on operational failure.
 ### `bdus self-update`
 
 `git pull` on the bdus-ops checkout itself — this toolbox, not a BraDypUS
-instance (that's `bdus update`, below). Refuses to run with local changes in
+instance (that's `bdus update`, below). Refuses to run with modified tracked files in
 the checkout, fetches, and fast-forwards only: if local history has diverged
 from the remote it stops with a clear error rather than creating a surprise
 merge commit. A no-op, with a one-line confirmation, when already current.
